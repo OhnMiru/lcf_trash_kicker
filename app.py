@@ -48,17 +48,18 @@ telethon_clients = {}
 tasks = {}
 pending_cleanups = {}
 
-# Состояния для авторизации
+# Состояния для авторизации и настройки
 class AuthState(StatesGroup):
     waiting_for_api_id = State()
     waiting_for_api_hash = State()
     waiting_for_code = State()
     waiting_for_password = State()
+    waiting_for_channel_link = State()
+    waiting_for_group_link = State()
 
 # ========== ФУНКЦИЯ ПАРСИНГА ССЫЛОК ==========
 def parse_post_url(url: str):
     import re
-    # Убираем https://, http://, telegram.me, t.me
     clean_url = re.sub(r'https?://(telegram\.me|t\.me)/', '', url)
     parts = clean_url.split('/')
     
@@ -71,13 +72,19 @@ def parse_post_url(url: str):
     except ValueError:
         return None, None
     
-    # Определяем тип ссылки
     if channel_part.isdigit():
         channel_id = int("-100" + channel_part)
     else:
         channel_id = channel_part
     
     return channel_id, post_id
+
+def extract_username_from_link(link: str):
+    import re
+    match = re.search(r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)', link)
+    if match:
+        return match.group(1)
+    return None
 
 # ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
 def get_settings(user_id: int):
@@ -182,7 +189,7 @@ async def start(message: types.Message):
     await message.answer(
         "Бот для автоматической чистки канала\n\n"
         "/login - авторизация (один раз)\n"
-        "/setup ID_канала ID_группы - настройка\n"
+        "/setup - настройка канала и группы\n"
         "/check ссылка часы - запустить проверку\n"
         "/status - активные задачи\n"
         "/cancel ID_поста - отменить задачу\n"
@@ -279,9 +286,9 @@ async def handle_contact(message: types.Message, state: FSMContext):
         
         await message.answer(
             "Авторизация успешна!\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n"
-            "Пример: /setup -1001234567890 -1009876543210\n\n"
-            "Как получить ID: перешлите сообщение из канала/группы боту @userinfobot"
+            "Теперь выполните /setup для настройки канала и группы.\n\n"
+            "/setup - настроить канал и группу по ссылке\n"
+            "/setup ID_канала ID_группы - ввести ID вручную"
         )
         await state.clear()
         
@@ -331,8 +338,9 @@ async def process_code(message: types.Message, state: FSMContext):
         
         await message.answer(
             "Авторизация успешна!\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n"
-            "Пример: /setup -1001234567890 -1009876543210"
+            "Теперь выполните /setup для настройки канала и группы.\n\n"
+            "/setup - настроить канал и группу по ссылке\n"
+            "/setup ID_канала ID_группы - ввести ID вручную"
         )
         await state.clear()
         
@@ -368,8 +376,9 @@ async def process_password(message: types.Message, state: FSMContext):
         
         await message.answer(
             "Авторизация успешна!\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n"
-            "Пример: /setup -1001234567890 -1009876543210"
+            "Теперь выполните /setup для настройки канала и группы.\n\n"
+            "/setup - настроить канал и группу по ссылке\n"
+            "/setup ID_канала ID_группы - ввести ID вручную"
         )
         await state.clear()
         
@@ -378,41 +387,203 @@ async def process_password(message: types.Message, state: FSMContext):
 
 @dp.message(Command("setup"))
 async def setup_command(message: types.Message):
-    args = message.text.split()
-    if len(args) != 3:
-        await message.answer(
-            "Использование: /setup ID_канала ID_группы\n"
-            "Пример: /setup -1001234567890 -1009876543210\n\n"
-            "Как получить ID: перешлите сообщение из канала/группы боту @userinfobot"
-        )
-        return
-    
-    try:
-        channel_id = int(args[1])
-        group_id = int(args[2])
-    except ValueError:
-        await message.answer("ID канала и группы должны быть числами")
-        return
-    
     settings = get_settings(message.from_user.id)
     if not settings or not settings.get("session_string"):
         await message.answer("Сначала выполните /login")
         return
     
-    save_settings(
-        message.from_user.id,
-        channel_id=channel_id,
-        group_id=group_id,
-        session_string=settings.get("session_string"),
-        api_id=settings.get("api_id"),
-        api_hash=settings.get("api_hash")
-    )
+    args = message.text.split()
+    
+    # Если есть аргументы - ручной ввод ID
+    if len(args) == 3:
+        try:
+            channel_id = int(args[1])
+            group_id = int(args[2])
+        except ValueError:
+            await message.answer("ID канала и группы должны быть числами")
+            return
+        
+        save_settings(
+            message.from_user.id,
+            channel_id=channel_id,
+            group_id=group_id,
+            session_string=settings.get("session_string"),
+            api_id=settings.get("api_id"),
+            api_hash=settings.get("api_hash")
+        )
+        await message.answer(
+            f"Настройки сохранены!\n\n"
+            f"Канал: {channel_id}\n"
+            f"Группа: {group_id}\n\n"
+            f"Теперь используйте /check"
+        )
+        return
+    
+    # Если аргументов нет - настройка по ссылкам
     await message.answer(
-        f"Настройки сохранены!\n\n"
-        f"Канал: {channel_id}\n"
-        f"Группа: {group_id}\n\n"
-        f"Теперь используйте /check"
+        "НАСТРОЙКА КАНАЛА И ГРУППЫ\n\n"
+        "Сначала отправьте ссылку на **канал**, где вы и бот являетесь администраторами.\n"
+        "Пример: https://t.me/username\n\n"
+        "После этого отправьте ссылку на **группу обсуждения**.\n\n"
+        "Для отмены: /cancel"
     )
+    await state.set_state(AuthState.waiting_for_channel_link)
+
+@dp.message(AuthState.waiting_for_channel_link)
+async def process_channel_link(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено")
+        return
+    
+    link = message.text.strip()
+    username = extract_username_from_link(link)
+    
+    if not username:
+        await message.answer("Неверный формат ссылки. Пример: https://t.me/username")
+        return
+    
+    try:
+        chat = await bot.get_chat(f"@{username}")
+        
+        # Проверяем, что бот - администратор
+        try:
+            bot_member = await bot.get_chat_member(chat.id, bot.id)
+            if bot_member.status not in ['administrator', 'creator']:
+                await message.answer(
+                    f"❌ Бот не является администратором канала {chat.title}.\n"
+                    f"Добавьте бота в администраторы и попробуйте снова."
+                )
+                return
+        except Exception:
+            await message.answer(
+                f"❌ Не удалось проверить права бота.\n"
+                f"Убедитесь, что бот добавлен в администраторы канала {chat.title}."
+            )
+            return
+        
+        # Проверяем, что пользователь - администратор
+        try:
+            user_member = await bot.get_chat_member(chat.id, message.from_user.id)
+            if user_member.status not in ['administrator', 'creator']:
+                await message.answer(
+                    f"❌ Вы не являетесь администратором канала {chat.title}.\n"
+                    f"Пожалуйста, выберите канал, где вы администратор."
+                )
+                return
+        except Exception:
+            await message.answer(
+                f"❌ Не удалось проверить ваши права.\n"
+                f"Убедитесь, что вы являетесь администратором канала {chat.title}."
+            )
+            return
+        
+        # Сохраняем канал
+        settings = get_settings(message.from_user.id)
+        save_settings(
+            message.from_user.id,
+            channel_id=chat.id,
+            group_id=settings.get("group_id") if settings else None,
+            session_string=settings.get("session_string") if settings else None,
+            api_id=settings.get("api_id") if settings else None,
+            api_hash=settings.get("api_hash") if settings else None
+        )
+        
+        await message.answer(
+            f"✅ Канал выбран: {chat.title}\n"
+            f"ID: {chat.id}\n\n"
+            f"Теперь отправьте ссылку на **группу обсуждения**.\n"
+            f"Бот и вы должны быть администраторами группы.\n\n"
+            f"Для отмены: /cancel"
+        )
+        await state.set_state(AuthState.waiting_for_group_link)
+        
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}\nУбедитесь, что ссылка верна.")
+
+@dp.message(AuthState.waiting_for_group_link)
+async def process_group_link(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено")
+        return
+    
+    link = message.text.strip()
+    username = extract_username_from_link(link)
+    
+    if not username:
+        await message.answer("Неверный формат ссылки. Пример: https://t.me/username")
+        return
+    
+    try:
+        chat = await bot.get_chat(f"@{username}")
+        
+        # Проверяем, что это группа
+        if chat.type not in ['group', 'supergroup']:
+            await message.answer("❌ Это не группа. Пожалуйста, отправьте ссылку на группу обсуждения.")
+            return
+        
+        # Проверяем, что бот - администратор
+        try:
+            bot_member = await bot.get_chat_member(chat.id, bot.id)
+            if bot_member.status not in ['administrator', 'creator']:
+                await message.answer(
+                    f"❌ Бот не является администратором группы {chat.title}.\n"
+                    f"Добавьте бота в администраторы и попробуйте снова."
+                )
+                return
+        except Exception:
+            await message.answer(
+                f"❌ Не удалось проверить права бота.\n"
+                f"Убедитесь, что бот добавлен в администраторы группы {chat.title}."
+            )
+            return
+        
+        # Проверяем, что пользователь - администратор
+        try:
+            user_member = await bot.get_chat_member(chat.id, message.from_user.id)
+            if user_member.status not in ['administrator', 'creator']:
+                await message.answer(
+                    f"❌ Вы не являетесь администратором группы {chat.title}.\n"
+                    f"Пожалуйста, выберите группу, где вы администратор."
+                )
+                return
+        except Exception:
+            await message.answer(
+                f"❌ Не удалось проверить ваши права.\n"
+                f"Убедитесь, что вы являетесь администратором группы {chat.title}."
+            )
+            return
+        
+        # Сохраняем группу
+        settings = get_settings(message.from_user.id)
+        save_settings(
+            message.from_user.id,
+            channel_id=settings.get("channel_id") if settings else None,
+            group_id=chat.id,
+            session_string=settings.get("session_string") if settings else None,
+            api_id=settings.get("api_id") if settings else None,
+            api_hash=settings.get("api_hash") if settings else None
+        )
+        
+        if settings and settings.get("channel_id"):
+            await message.answer(
+                f"✅ Настройки завершены!\n\n"
+                f"Канал: {settings['channel_id']}\n"
+                f"Группа: {chat.id}\n\n"
+                f"Теперь используйте /check"
+            )
+        else:
+            await message.answer(
+                f"✅ Группа выбрана: {chat.title}\n"
+                f"ID: {chat.id}\n\n"
+                f"Сначала выберите канал. Повторите /setup"
+            )
+        
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}\nУбедитесь, что ссылка верна.")
 
 @dp.message(Command("mysettings"))
 async def mysettings(message: types.Message):
@@ -471,10 +642,9 @@ async def check_command(message: types.Message):
         )
         return
     
-    # Проверка канала
     if channel_id_or_username != settings["channel_id"]:
         await message.answer(
-            f"Это не ваш канал.\n\n"
+            f"❌ Это не ваш канал.\n\n"
             f"Ваш канал: {settings['channel_id']}\n"
             f"Убедитесь, что ссылка ведёт на правильный канал."
         )
@@ -490,7 +660,7 @@ async def check_command(message: types.Message):
         "user_id": message.from_user.id
     }
     
-    # Форматируем время для красивого вывода
+    # Форматируем время
     if hours < 1:
         minutes = int(hours * 60)
         time_str = f"{minutes} минут"
@@ -502,7 +672,7 @@ async def check_command(message: types.Message):
         time_str = f"{hours} часов"
     
     await message.answer(
-        f"Задача создана\n\n"
+        f"✅ Задача создана\n\n"
         f"Пост: {post_url}\n"
         f"Жду {time_str}\n"
         f"Готово: {datetime.fromtimestamp(deadline).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -541,11 +711,11 @@ async def cancel(message: types.Message):
     
     if post_id in tasks and tasks[post_id].get("user_id") == message.from_user.id:
         del tasks[post_id]
-        await message.answer(f"Задача для поста {post_id} отменена")
+        await message.answer(f"✅ Задача для поста {post_id} отменена")
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
-# ========== КОЛБЭКИ ==========
+# ========== КОЛБЭКИ ДЛЯ РЕДАКТИРОВАНИЯ ==========
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
@@ -681,7 +851,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ==========
+# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
@@ -695,6 +865,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     if post_id in tasks:
         del tasks[post_id]
     
+    # Собираем комментаторов
     commenters = set()
     try:
         async for msg in bot.get_chat_history(settings["channel_id"], limit=1000):
@@ -704,6 +875,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
     
+    # Собираем участников группы
     members = set()
     try:
         async for member in bot.get_chat_members(settings["group_id"]):
@@ -716,9 +888,10 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     to_kick = list(members - commenters)
     
     if not to_kick:
-        await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились!")
+        await bot.send_message(reply_chat_id, f"✅ Пост {post_link}\nВсе отметились!")
         return
     
+    # Кикаем из группы
     kicked_group = 0
     for uid in to_kick:
         try:
@@ -731,6 +904,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     await bot.send_message(settings["group_id"], f"Кикнуто из группы: {kicked_group}")
     
+    # Готовим CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["user_id"])
@@ -738,6 +912,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         writer.writerow([uid])
     csv_bytes = output.getvalue().encode("utf-8")
     
+    # Формируем список для показа
     user_lines = []
     for uid in to_kick[:30]:
         try:
