@@ -22,6 +22,9 @@ load_dotenv()
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# Адрес вашего Mini App (ЗАМЕНИТЕ НА ВАШ РЕАЛЬНЫЙ URL)
+MINI_APP_URL = "https://lcf-trash-kicker-bot.onrender.com/"
+
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -36,22 +39,16 @@ cursor.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         user_id INTEGER PRIMARY KEY,
         channel_id INTEGER,
-        group_id INTEGER
-    )
-""")
-
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS user_api (
-        user_id INTEGER PRIMARY KEY,
-        api_id INTEGER,
-        api_hash TEXT
-    )
-""")
-
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS sessions (
-        user_id INTEGER PRIMARY KEY,
+        group_id INTEGER,
         session_string TEXT
+    )
+""")
+
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pending_auth (
+        user_id INTEGER PRIMARY KEY,
+        session_string TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 """)
 conn.commit()
@@ -61,61 +58,39 @@ telethon_clients = {}
 tasks = {}
 pending_cleanups = {}
 
-# Состояния для авторизации
-class AuthState(StatesGroup):
-    waiting_for_api_id = State()
-    waiting_for_api_hash = State()
-    waiting_for_phone = State()
-    waiting_for_code = State()
-    waiting_for_password = State()
-    waiting_for_resend = State()  # Новое состояние для повторной отправки
-
 # ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
 def get_settings(user_id: int):
-    cursor.execute("SELECT channel_id, group_id FROM settings WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT channel_id, group_id, session_string FROM settings WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if row:
-        return {"channel_id": row[0], "group_id": row[1]}
+        return {"channel_id": row[0], "group_id": row[1], "session_string": row[2]}
     return None
 
-def save_settings(user_id: int, channel_id: int, group_id: int):
-    cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id) VALUES (?, ?, ?)",
-                   (user_id, channel_id, group_id))
+def save_settings(user_id: int, channel_id: int, group_id: int, session_string: str = None):
+    existing = get_settings(user_id)
+    if existing and session_string is None:
+        session_string = existing.get("session_string")
+    cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string) VALUES (?, ?, ?, ?)",
+                   (user_id, channel_id, group_id, session_string))
     conn.commit()
-
-def get_user_api(user_id: int):
-    cursor.execute("SELECT api_id, api_hash FROM user_api WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    if row:
-        return {"api_id": row[0], "api_hash": row[1]}
-    return None
-
-def save_user_api(user_id: int, api_id: int, api_hash: str):
-    cursor.execute("INSERT OR REPLACE INTO user_api (user_id, api_id, api_hash) VALUES (?, ?, ?)",
-                   (user_id, api_id, api_hash))
-    conn.commit()
-
-def get_session(user_id: int):
-    cursor.execute("SELECT session_string FROM sessions WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    return row[0] if row else None
 
 def save_session(user_id: int, session_string: str):
-    cursor.execute("INSERT OR REPLACE INTO sessions (user_id, session_string) VALUES (?, ?)",
-                   (user_id, session_string))
+    settings = get_settings(user_id)
+    if settings:
+        cursor.execute("UPDATE settings SET session_string = ? WHERE user_id = ?", (session_string, user_id))
+    else:
+        cursor.execute("INSERT INTO settings (user_id, session_string) VALUES (?, ?)", (user_id, session_string))
     conn.commit()
 
 async def get_telethon_client(user_id: int):
     if user_id in telethon_clients and telethon_clients[user_id].is_connected():
         return telethon_clients[user_id]
     
-    session_string = get_session(user_id)
-    api_data = get_user_api(user_id)
-    
-    if not session_string or not api_data:
+    settings = get_settings(user_id)
+    if not settings or not settings.get("session_string"):
         return None
     
-    client = TelegramClient(StringSession(session_string), api_data["api_id"], api_data["api_hash"])
+    client = TelegramClient(StringSession(settings["session_string"]), 0, "")  # API ключи уже в сессии
     await client.start()
     telethon_clients[user_id] = client
     return client
@@ -130,7 +105,7 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     
     client = await get_telethon_client(user_id)
     if not client:
-        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена. Выполните /login"}
+        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена"}
     
     success = 0
     errors = 0
@@ -153,6 +128,22 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     
     return {"success": success, "errors": errors, "total": len(user_ids)}
 
+# ========== ОБРАБОТЧИК СЕССИИ ОТ MINI APP ==========
+@dp.message(lambda message: message.text and message.text.startswith("SESSION:"))
+async def handle_session_string(message: types.Message):
+    session_string = message.text.replace("SESSION:", "").strip()
+    
+    if len(session_string) > 50:
+        save_session(message.from_user.id, session_string)
+        await message.answer(
+            "Авторизация успешна!\n\n"
+            "Теперь выполните /setup для настройки канала и группы.\n"
+            "Пример: /setup -1001234567890 -1009876543210\n\n"
+            "Как получить ID: перешлите сообщение из канала и группы боту @userinfobot"
+        )
+    else:
+        await message.answer("Ошибка: получена неверная сессионная строка")
+
 # ========== КОМАНДЫ БОТА ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -167,206 +158,26 @@ async def start(message: types.Message):
     )
 
 @dp.message(Command("login"))
-async def cmd_login(message: types.Message, state: FSMContext):
+async def cmd_login(message: types.Message):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Войти через Telegram",
+            web_app=types.WebAppInfo(url=MINI_APP_URL)
+        )]
+    ])
+    
     await message.answer(
         "АВТОРИЗАЦИЯ\n\n"
-        "Шаг 1 из 5: Введите ваш API ID\n"
-        "(число с сайта my.telegram.org -> API Development Tools)\n\n"
-        "Пример: 1234567\n\n"
-        "Для отмены: /cancel"
+        "Нажмите на кнопку ниже, чтобы открыть окно авторизации.\n\n"
+        "Что нужно ввести:\n"
+        "1. API ID (число с my.telegram.org)\n"
+        "2. API HASH (строка с my.telegram.org)\n"
+        "3. Номер телефона в формате +79001234567\n\n"
+        "После ввода номера Telegram пришлёт код.\n"
+        "Введите код в открывшемся окне.\n\n"
+        "Это нужно сделать один раз.",
+        reply_markup=keyboard
     )
-    await state.set_state(AuthState.waiting_for_api_id)
-
-@dp.message(AuthState.waiting_for_api_id)
-async def process_api_id(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("Отменено")
-        return
-    
-    try:
-        api_id = int(message.text.strip())
-        await state.update_data(api_id=api_id)
-        await message.answer(
-            "Шаг 2 из 5: Введите ваш API HASH\n"
-            "(строка с сайта my.telegram.org)\n\n"
-            "Пример: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6\n\n"
-            "Для отмены: /cancel"
-        )
-        await state.set_state(AuthState.waiting_for_api_hash)
-    except ValueError:
-        await message.answer("Ошибка: API ID должен быть числом")
-
-@dp.message(AuthState.waiting_for_api_hash)
-async def process_api_hash(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("Отменено")
-        return
-    
-    api_hash = message.text.strip()
-    await state.update_data(api_hash=api_hash)
-    
-    await message.answer(
-        "Шаг 3 из 5: Введите ваш номер телефона\n"
-        "в международном формате с +\n\n"
-        "Пример: +79001234567\n\n"
-        "Для отмены: /cancel"
-    )
-    await state.set_state(AuthState.waiting_for_phone)
-
-@dp.message(AuthState.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("Отменено")
-        return
-    
-    phone = message.text.strip()
-    if not phone.startswith('+'):
-        await message.answer("Номер должен начинаться с +")
-        return
-    
-    data = await state.get_data()
-    api_id = data.get("api_id")
-    api_hash = data.get("api_hash")
-    
-    await state.update_data(phone=phone)
-    
-    client = TelegramClient(StringSession(), api_id, api_hash)
-    await client.connect()
-    
-    try:
-        await client.send_code_request(phone)
-        await state.update_data(client=client)
-        
-        # Кнопка для повторной отправки кода
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Повторно отправить код", callback_data="resend_code")]
-        ])
-        
-        await message.answer(
-            "Код отправлен!\n\n"
-            "Шаг 4 из 5: Введите код подтверждения из Telegram\n"
-            "Код действителен 3 минуты. Если не пришёл - нажмите кнопку ниже.\n\n"
-            "Пример: 12345\n\n"
-            "Для отмены: /cancel",
-            reply_markup=keyboard
-        )
-        await state.set_state(AuthState.waiting_for_code)
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
-        await state.clear()
-
-@dp.callback_query(lambda c: c.data == "resend_code")
-async def resend_code(callback: types.CallbackQuery, state: FSMContext):
-    # Получаем текущее состояние
-    current_state = await state.get_state()
-    if current_state != AuthState.waiting_for_code:
-        await callback.answer("Сначала начните авторизацию заново с /login")
-        return
-    
-    data = await state.get_data()
-    client = data.get('client')
-    phone = data.get('phone')
-    
-    if not client:
-        await callback.answer("Сессия потеряна. Начните заново с /login")
-        return
-    
-    try:
-        await client.send_code_request(phone)
-        await callback.message.edit_text(
-            "Код отправлен повторно!\n\n"
-            "Шаг 4 из 5: Введите код подтверждения из Telegram\n"
-            "Пример: 12345\n\n"
-            "Для отмены: /cancel"
-        )
-        await callback.answer("Код отправлен")
-    except Exception as e:
-        await callback.answer(f"Ошибка: {e}")
-
-@dp.message(AuthState.waiting_for_code)
-async def process_code(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("Отменено")
-        return
-    
-    code = message.text.strip()
-    data = await state.get_data()
-    client = data.get('client')
-    phone = data.get('phone')
-    api_id = data.get('api_id')
-    api_hash = data.get('api_hash')
-    
-    if not client:
-        await message.answer("Сессия потеряна. Начните заново с /login")
-        await state.clear()
-        return
-    
-    try:
-        await client.sign_in(phone, code)
-        session_string = StringSession.save(client.session)
-        save_session(message.from_user.id, session_string)
-        save_user_api(message.from_user.id, api_id, api_hash)
-        
-        await client.disconnect()
-        
-        await message.answer(
-            "Авторизация успешна!\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n"
-            "Пример: /setup -1001234567890 -1009876543210"
-        )
-        await state.clear()
-        
-    except Exception as e:
-        error_text = str(e).lower()
-        if "phone code expired" in error_text or "code expired" in error_text:
-            await message.answer(
-                "Код устарел. Нажмите кнопку 'Повторно отправить код' под предыдущим сообщением,\n"
-                "чтобы получить новый код, или начните заново с /login"
-            )
-        elif "password" in error_text or "2fa" in error_text:
-            await message.answer(
-                "Шаг 5 из 5: Введите пароль двухфакторной аутентификации\n\n"
-                "Для отмены: /cancel"
-            )
-            await state.set_state(AuthState.waiting_for_password)
-            await state.update_data(client=client, phone=phone)
-        else:
-            await message.answer(f"Ошибка: {e}")
-            await state.clear()
-
-@dp.message(AuthState.waiting_for_password)
-async def process_password(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("Отменено")
-        return
-    
-    password = message.text.strip()
-    data = await state.get_data()
-    client = data.get('client')
-    api_id = data.get('api_id')
-    api_hash = data.get('api_hash')
-    
-    try:
-        await client.sign_in(password=password)
-        session_string = StringSession.save(client.session)
-        save_session(message.from_user.id, session_string)
-        save_user_api(message.from_user.id, api_id, api_hash)
-        
-        await client.disconnect()
-        
-        await message.answer(
-            "Авторизация успешна!\n\n"
-            "Теперь выполните /setup для настройки канала и группы."
-        )
-        await state.clear()
-        
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
 
 @dp.message(Command("setup"))
 async def setup_command(message: types.Message):
@@ -386,11 +197,12 @@ async def setup_command(message: types.Message):
         await message.answer("ID канала и группы должны быть числами")
         return
     
-    if not get_session(message.from_user.id):
+    settings = get_settings(message.from_user.id)
+    if not settings or not settings.get("session_string"):
         await message.answer("Сначала выполните /login")
         return
     
-    save_settings(message.from_user.id, channel_id, group_id)
+    save_settings(message.from_user.id, channel_id, group_id, settings.get("session_string"))
     await message.answer(
         f"Настройки сохранены!\n\n"
         f"Канал: {channel_id}\n"
@@ -401,33 +213,25 @@ async def setup_command(message: types.Message):
 @dp.message(Command("mysettings"))
 async def mysettings(message: types.Message):
     settings = get_settings(message.from_user.id)
-    api_data = get_user_api(message.from_user.id)
-    has_session = get_session(message.from_user.id) is not None
     
     text = "Ваши настройки:\n\n"
     if settings:
-        text += f"Канал: {settings['channel_id']}\n"
-        text += f"Группа: {settings['group_id']}\n"
+        text += f"Канал: {settings['channel_id'] if settings['channel_id'] else 'не настроен'}\n"
+        text += f"Группа: {settings['group_id'] if settings['group_id'] else 'не настроена'}\n"
+        text += f"Авторизация: {'выполнена' if settings['session_string'] else 'не выполнена'}\n"
     else:
-        text += "Канал: не настроен\n"
-    
-    if api_data:
-        text += f"API ID: {api_data['api_id']}\n"
-    else:
-        text += "API ID: не указан\n"
-    
-    text += f"Авторизация: {'выполнена' if has_session else 'не выполнена'}\n"
+        text += "Настройки не найдены. Выполните /login и /setup"
     
     await message.answer(text)
 
 @dp.message(Command("check"))
 async def check_command(message: types.Message):
     settings = get_settings(message.from_user.id)
-    if not settings:
+    if not settings or not settings.get("channel_id"):
         await message.answer("Сначала выполните /setup")
         return
     
-    if not get_session(message.from_user.id):
+    if not settings.get("session_string"):
         await message.answer("Сначала выполните /login")
         return
     
@@ -509,7 +313,7 @@ async def cancel(message: types.Message):
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
-# ========== КОЛБЭКИ ==========
+# ========== КОЛБЭКИ ДЛЯ РЕДАКТИРОВАНИЯ СПИСКА ==========
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
@@ -645,7 +449,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ==========
+# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ПОСТА ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
@@ -754,16 +558,12 @@ def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# ========== ЗАПУСК ==========
 async def main():
     print("Бот запущен и готов к работе")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Запускаем Flask в фоновом потоке
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    
-    # Запускаем бота в главном потоке
     asyncio.run(main())
