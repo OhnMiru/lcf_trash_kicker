@@ -15,12 +15,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+RENDER_URL = os.getenv("RENDER_URL", "https://lcf-trash-kicker.onrender.com")
+
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -39,6 +42,16 @@ cursor.execute("""
         session_string TEXT,
         api_id INTEGER,
         api_hash TEXT
+    )
+""")
+
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS active_tasks (
+        post_id INTEGER PRIMARY KEY,
+        deadline REAL,
+        post_link TEXT,
+        hours REAL,
+        user_id INTEGER
     )
 """)
 conn.commit()
@@ -136,6 +149,33 @@ def save_session(user_id: int, session_string: str):
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
                    (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
+
+def restore_tasks_from_db():
+    """Восстанавливает активные задачи из базы данных при запуске бота"""
+    cursor.execute("SELECT post_id, deadline, post_link, hours, user_id FROM active_tasks")
+    rows = cursor.fetchall()
+    
+    restored_count = 0
+    current_time = asyncio.get_event_loop().time()
+    
+    for row in rows:
+        post_id, deadline_timestamp, post_link, hours, user_id = row
+        if deadline_timestamp > current_time:
+            tasks[post_id] = {
+                "deadline": deadline_timestamp,
+                "post_link": post_link,
+                "hours": hours,
+                "user_id": user_id,
+                "restored": True
+            }
+            restored_count += 1
+            asyncio.create_task(process_post(post_id, deadline_timestamp, None, post_link, user_id))
+            print(f"Восстановлена задача для поста {post_id}")
+        else:
+            cursor.execute("DELETE FROM active_tasks WHERE post_id = ?", (post_id,))
+    
+    conn.commit()
+    print(f"Восстановлено задач: {restored_count}")
 
 async def get_telethon_client(user_id: int):
     if user_id in telethon_clients and telethon_clients[user_id].is_connected():
@@ -685,6 +725,15 @@ async def check_command(message: types.Message):
         "user_id": message.from_user.id
     }
     
+    # Сохраняем задачу в базу данных
+    cursor.execute("""
+        INSERT OR REPLACE INTO active_tasks (post_id, deadline, post_link, hours, user_id)
+        VALUES (?, ?, ?, ?, ?)
+    """, (post_id, deadline, post_url, hours, message.from_user.id))
+    conn.commit()
+    
+    print(f"DEBUG: Задача создана для поста {post_id}, deadline = {deadline}, текущее время = {asyncio.get_event_loop().time()}")
+    
     # Форматируем время
     if hours < 1:
         minutes = int(hours * 60)
@@ -736,6 +785,8 @@ async def cancel(message: types.Message):
     
     if post_id in tasks and tasks[post_id].get("user_id") == message.from_user.id:
         del tasks[post_id]
+        cursor.execute("DELETE FROM active_tasks WHERE post_id = ?", (post_id,))
+        conn.commit()
         await message.answer(f"Задача для поста {post_id} отменена")
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
@@ -876,8 +927,15 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ (ЧЕРЕЗ TELETHON) ==========
+# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
+    print(f"DEBUG: process_post запущена для поста {post_id}")
+    print(f"DEBUG: deadline = {deadline}, текущее время = {asyncio.get_event_loop().time()}")
+    
+    # Удаляем задачу из базы
+    cursor.execute("DELETE FROM active_tasks WHERE post_id = ?", (post_id,))
+    conn.commit()
+    
     settings = get_settings(user_id)
     if not settings:
         await bot.send_message(reply_chat_id, "Настройки не найдены")
@@ -885,10 +943,13 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     wait_seconds = deadline - asyncio.get_event_loop().time()
     if wait_seconds > 0:
+        print(f"DEBUG: Ожидание {wait_seconds} секунд до дедлайна")
         await asyncio.sleep(wait_seconds)
     
     if post_id in tasks:
         del tasks[post_id]
+    
+    print(f"DEBUG: Начинаю сбор комментаторов для поста {post_id}")
     
     # Получаем клиент Telethon для пользователя
     client = await get_telethon_client(user_id)
@@ -911,12 +972,14 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         # Собираем все сообщения, которые являются ответами на этот пост
         async for reply in client.iter_messages(channel_entity, reply_to=post_id):
             if reply.from_id:
-                # Извлекаем user_id (Telethon может возвращать разные типы)
+                # Извлекаем user_id
                 if hasattr(reply.from_id, 'user_id'):
                     user_id_telethon = reply.from_id.user_id
                 else:
                     user_id_telethon = reply.from_id
                 commenters.add(user_id_telethon)
+        
+        print(f"DEBUG: Найдено комментаторов: {len(commenters)}")
                 
     except Exception as e:
         await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
@@ -932,11 +995,15 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
         return
     
+    print(f"DEBUG: Участников группы: {len(members)}")
+    
     to_kick = list(members - commenters)
     
     if not to_kick:
         await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились")
         return
+    
+    print(f"DEBUG: Нужно кикнуть {len(to_kick)} человек")
     
     # Кикаем из группы
     kicked_group = 0
@@ -1012,8 +1079,24 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
+async def self_ping():
+    """Держит бота активным через внутренние пинги"""
+    while True:
+        await asyncio.sleep(120)  # каждые 2 минуты
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{RENDER_URL}/health") as resp:
+                    if resp.status == 200:
+                        print("Self-ping успешен")
+                    else:
+                        print(f"Self-ping вернул статус: {resp.status}")
+        except Exception as e:
+            print(f"Self-ping ошибка: {e}")
+
 async def main():
     print("Бот запущен и готов к работе")
+    restore_tasks_from_db()
+    asyncio.create_task(self_ping())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
