@@ -24,7 +24,7 @@ RENDER_URL = "https://lcf-trash-kicker.onrender.com"
 
 # Принудительно удаляем вебхук при запуске
 try:
-    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
+    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
     print("Вебхук удалён при запуске")
 except Exception as e:
     print(f"Ошибка удаления вебхука: {e}")
@@ -182,24 +182,46 @@ def restore_tasks_from_db():
     print(f"Восстановлено задач: {restored_count}")
 
 async def get_telethon_client(user_id: int):
+    print(f"DEBUG: Пытаюсь получить клиент для user_id={user_id}")
+    
     if user_id in telethon_clients and telethon_clients[user_id].is_connected():
+        print(f"DEBUG: Клиент для user_id={user_id} уже существует и подключён")
         return telethon_clients[user_id]
     
     settings = get_settings(user_id)
-    if not settings or not settings.get("session_string"):
+    if not settings:
+        print(f"DEBUG: Настройки для user_id={user_id} не найдены")
         return None
+    
+    if not settings.get("session_string"):
+        print(f"DEBUG: session_string для user_id={user_id} отсутствует")
+        return None
+    
+    print(f"DEBUG: session_string для user_id={user_id} найдена")
     
     api_id = settings.get("api_id")
     api_hash = settings.get("api_hash")
     
     if not api_id or not api_hash:
-        print(f"DEBUG: Нет API данных для пользователя {user_id}")
+        print(f"DEBUG: API данные для user_id={user_id} отсутствуют")
         return None
     
+    print(f"DEBUG: API данные для user_id={user_id} найдены: api_id={api_id}")
+    
     client = TelegramClient(StringSession(settings["session_string"]), api_id, api_hash)
-    await client.start()
-    telethon_clients[user_id] = client
-    return client
+    
+    try:
+        # Запрещаем Telethon запрашивать ввод из консоли
+        await client.start(phone=lambda: None, password=lambda: None)
+        print(f"DEBUG: Клиент для user_id={user_id} успешно запущен")
+        telethon_clients[user_id] = client
+        return client
+    except Exception as e:
+        print(f"Не удалось запустить клиент для user_id={user_id}: {e}. Возможно, сессия устарела.")
+        # Если не получилось, удаляем сессию, чтобы пользователь мог перелогиниться
+        cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return None
 
 async def clean_channel_from_list(user_id: int, user_ids: list, progress_callback=None) -> dict:
     if not user_ids:
@@ -1068,7 +1090,7 @@ def run_flask():
 
 async def self_ping():
     while True:
-        await asyncio.sleep(120)
+        await asyncio.sleep(60)  # Каждую минуту
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{RENDER_URL}/health") as resp:
