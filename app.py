@@ -422,9 +422,9 @@ async def setup_command(message: types.Message, state: FSMContext):
     # Если аргументов нет - настройка по ссылкам
     await message.answer(
         "НАСТРОЙКА КАНАЛА И ГРУППЫ\n\n"
-        "Сначала отправьте ссылку на **канал**, где вы и бот являетесь администраторами.\n"
+        "Сначала отправьте ссылку на канал, где вы и бот являетесь администраторами.\n"
         "Пример: https://t.me/username\n\n"
-        "После этого отправьте ссылку на **группу обсуждения**.\n\n"
+        "После этого отправьте ссылку на группу обсуждения.\n\n"
         "Для отмены: /cancel"
     )
     await state.set_state(AuthState.waiting_for_channel_link)
@@ -492,7 +492,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await message.answer(
             f"Канал выбран: {chat.title}\n"
             f"ID: {chat.id}\n\n"
-            f"Теперь отправьте ссылку на **группу обсуждения**.\n"
+            f"Теперь отправьте ссылку на группу обсуждения.\n"
             f"Бот и вы должны быть администраторами группы.\n\n"
             f"Для отмены: /cancel"
         )
@@ -646,7 +646,6 @@ async def check_command(message: types.Message):
     # Пытаемся получить числовой ID канала по username
     actual_channel_id = channel_id_or_username
     if isinstance(actual_channel_id, str):
-        # Это username канала, нужно получить его числовой ID
         try:
             chat = await bot.get_chat(f"@{actual_channel_id}")
             actual_channel_id = chat.id
@@ -656,7 +655,6 @@ async def check_command(message: types.Message):
     
     # Сравниваем ID
     if actual_channel_id != saved_channel_id:
-        # Пытаемся получить название канала для понятного сообщения
         channel_name = str(saved_channel_id)
         try:
             chat = await bot.get_chat(saved_channel_id)
@@ -706,7 +704,7 @@ async def check_command(message: types.Message):
     )
     
     asyncio.create_task(process_post(post_id, deadline, message.chat.id, post_url, message.from_user.id))
-    
+
 @dp.message(Command("status"))
 async def status(message: types.Message):
     user_tasks = {pid: data for pid, data in tasks.items() if data.get("user_id") == message.from_user.id}
@@ -878,7 +876,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ==========
+# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ (ЧЕРЕЗ TELETHON) ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
@@ -892,17 +890,39 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     if post_id in tasks:
         del tasks[post_id]
     
-    # Собираем комментаторов
+    # Получаем клиент Telethon для пользователя
+    client = await get_telethon_client(user_id)
+    if not client:
+        await bot.send_message(reply_chat_id, "Ошибка: сессия Telethon не найдена. Выполните /login")
+        return
+    
+    # Собираем комментаторов через Telethon
     commenters = set()
     try:
-        async for msg in bot.get_chat_history(settings["channel_id"], limit=1000):
-            if msg.reply_to_message and msg.reply_to_message.message_id == post_id:
-                commenters.add(msg.from_user.id)
+        # Получаем объект канала
+        channel_entity = await client.get_entity(settings["channel_id"])
+        
+        # Проверяем, существует ли пост
+        message = await client.get_messages(channel_entity, ids=post_id)
+        if not message:
+            await bot.send_message(reply_chat_id, f"Пост с ID {post_id} не найден в канале")
+            return
+        
+        # Собираем все сообщения, которые являются ответами на этот пост
+        async for reply in client.iter_messages(channel_entity, reply_to=post_id):
+            if reply.from_id:
+                # Извлекаем user_id (Telethon может возвращать разные типы)
+                if hasattr(reply.from_id, 'user_id'):
+                    user_id_telethon = reply.from_id.user_id
+                else:
+                    user_id_telethon = reply.from_id
+                commenters.add(user_id_telethon)
+                
     except Exception as e:
         await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
     
-    # Собираем участников группы
+    # Собираем участников группы (через aiogram)
     members = set()
     try:
         async for member in bot.get_chat_members(settings["group_id"]):
