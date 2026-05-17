@@ -17,13 +17,10 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 import aiohttp
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-RENDER_URL = os.getenv("RENDER_URL", "https://lcf-trash-kicker.onrender.com")
+RENDER_URL = "https://lcf-trash-kicker.onrender.com"
 
 # Принудительно удаляем вебхук при запуске
 try:
@@ -192,7 +189,14 @@ async def get_telethon_client(user_id: int):
     if not settings or not settings.get("session_string"):
         return None
     
-    client = TelegramClient(StringSession(settings["session_string"]), 0, "")
+    api_id = settings.get("api_id")
+    api_hash = settings.get("api_hash")
+    
+    if not api_id or not api_hash:
+        print(f"DEBUG: Нет API данных для пользователя {user_id}")
+        return None
+    
+    client = TelegramClient(StringSession(settings["session_string"]), api_id, api_hash)
     await client.start()
     telethon_clients[user_id] = client
     return client
