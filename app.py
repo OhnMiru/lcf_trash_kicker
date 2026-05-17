@@ -194,10 +194,10 @@ async def get_telethon_client(user_id: int):
         return None
     
     if not settings.get("session_string"):
-        print(f"DEBUG: session_string для user_id={user_id} отсутствует")
+        print(f"DEBUG: session_string для user_id={user_id} отсутствует в БД")
         return None
     
-    print(f"DEBUG: session_string для user_id={user_id} найдена")
+    print(f"DEBUG: session_string для user_id={user_id} найдена (длина: {len(settings['session_string'])})")
     
     api_id = settings.get("api_id")
     api_hash = settings.get("api_hash")
@@ -208,19 +208,28 @@ async def get_telethon_client(user_id: int):
     
     print(f"DEBUG: API данные для user_id={user_id} найдены: api_id={api_id}")
     
-    client = TelegramClient(StringSession(settings["session_string"]), api_id, api_hash)
-    
+    # Пробуем создать клиент
     try:
+        client = TelegramClient(StringSession(settings["session_string"]), api_id, api_hash)
+        
         # Запрещаем Telethon запрашивать ввод из консоли
         await client.start(phone=lambda: None, password=lambda: None)
-        print(f"DEBUG: Клиент для user_id={user_id} успешно запущен")
+        
+        # Проверяем, что клиент работает
+        me = await client.get_me()
+        print(f"DEBUG: Клиент для user_id={user_id} успешно запущен. Пользователь: {me.first_name}")
         telethon_clients[user_id] = client
         return client
+        
     except Exception as e:
-        print(f"Не удалось запустить клиент для user_id={user_id}: {e}. Возможно, сессия устарела.")
-        # Если не получилось, удаляем сессию, чтобы пользователь мог перелогиниться
-        cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
-        conn.commit()
+        print(f"Ошибка при запуске клиента для user_id={user_id}: {type(e).__name__}: {e}")
+        
+        # Если сессия повреждена, удаляем её из БД
+        if "StringSession" in str(e) or "EOF" in str(e) or "invalid" in str(e).lower():
+            print(f"DEBUG: Сессия повреждена, удаляем из БД для user_id={user_id}")
+            cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
+            conn.commit()
+        
         return None
 
 async def clean_channel_from_list(user_id: int, user_ids: list, progress_callback=None) -> dict:
@@ -233,7 +242,7 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     
     client = await get_telethon_client(user_id)
     if not client:
-        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена"}
+        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена. Выполните /login заново"}
     
     success = 0
     errors = 0
@@ -972,7 +981,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     client = await get_telethon_client(user_id)
     if not client:
-        await bot.send_message(reply_chat_id, "Ошибка: сессия Telethon не найдена. Выполните /login")
+        await bot.send_message(reply_chat_id, "Ошибка: сессия Telethon не найдена. Выполните /login заново")
         return
     
     commenters = set()
@@ -1090,7 +1099,7 @@ def run_flask():
 
 async def self_ping():
     while True:
-        await asyncio.sleep(60)  # Каждую минуту
+        await asyncio.sleep(60)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{RENDER_URL}/health") as resp:
