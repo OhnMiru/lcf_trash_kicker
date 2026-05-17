@@ -247,7 +247,7 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     )
     
     await message.answer(
-        "API данные сохранены!\n\n"
+        "API данные сохранены\n\n"
         "Нажмите на кнопку ниже, чтобы поделиться номером телефона.\n"
         "Telegram сам отправит ваш номер боту.\n\n"
         "Это нужно для авторизации.",
@@ -285,7 +285,7 @@ async def handle_contact(message: types.Message, state: FSMContext):
         await client.disconnect()
         
         await message.answer(
-            "Авторизация успешна!\n\n"
+            "Авторизация успешна\n\n"
             "Теперь выполните /setup для настройки канала и группы.\n\n"
             "/setup - настроить канал и группу по ссылке\n"
             "/setup ID_канала ID_группы - ввести ID вручную"
@@ -337,7 +337,7 @@ async def process_code(message: types.Message, state: FSMContext):
         await client.disconnect()
         
         await message.answer(
-            "Авторизация успешна!\n\n"
+            "Авторизация успешна\n\n"
             "Теперь выполните /setup для настройки канала и группы.\n\n"
             "/setup - настроить канал и группу по ссылке\n"
             "/setup ID_канала ID_группы - ввести ID вручную"
@@ -375,7 +375,7 @@ async def process_password(message: types.Message, state: FSMContext):
         await client.disconnect()
         
         await message.answer(
-            "Авторизация успешна!\n\n"
+            "Авторизация успешна\n\n"
             "Теперь выполните /setup для настройки канала и группы.\n\n"
             "/setup - настроить канал и группу по ссылке\n"
             "/setup ID_канала ID_группы - ввести ID вручную"
@@ -386,7 +386,7 @@ async def process_password(message: types.Message, state: FSMContext):
         await message.answer(f"Ошибка: {e}")
 
 @dp.message(Command("setup"))
-async def setup_command(message: types.Message):
+async def setup_command(message: types.Message, state: FSMContext):
     settings = get_settings(message.from_user.id)
     if not settings or not settings.get("session_string"):
         await message.answer("Сначала выполните /login")
@@ -412,7 +412,7 @@ async def setup_command(message: types.Message):
             api_hash=settings.get("api_hash")
         )
         await message.answer(
-            f"Настройки сохранены!\n\n"
+            f"Настройки сохранены\n\n"
             f"Канал: {channel_id}\n"
             f"Группа: {group_id}\n\n"
             f"Теперь используйте /check"
@@ -451,13 +451,13 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             bot_member = await bot.get_chat_member(chat.id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 await message.answer(
-                    f"❌ Бот не является администратором канала {chat.title}.\n"
+                    f"Бот не является администратором канала {chat.title}.\n"
                     f"Добавьте бота в администраторы и попробуйте снова."
                 )
                 return
         except Exception:
             await message.answer(
-                f"❌ Не удалось проверить права бота.\n"
+                f"Не удалось проверить права бота.\n"
                 f"Убедитесь, что бот добавлен в администраторы канала {chat.title}."
             )
             return
@@ -467,13 +467,13 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             user_member = await bot.get_chat_member(chat.id, message.from_user.id)
             if user_member.status not in ['administrator', 'creator']:
                 await message.answer(
-                    f"❌ Вы не являетесь администратором канала {chat.title}.\n"
+                    f"Вы не являетесь администратором канала {chat.title}.\n"
                     f"Пожалуйста, выберите канал, где вы администратор."
                 )
                 return
         except Exception:
             await message.answer(
-                f"❌ Не удалось проверить ваши права.\n"
+                f"Не удалось проверить ваши права.\n"
                 f"Убедитесь, что вы являетесь администратором канала {chat.title}."
             )
             return
@@ -490,7 +490,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         )
         
         await message.answer(
-            f"✅ Канал выбран: {chat.title}\n"
+            f"Канал выбран: {chat.title}\n"
             f"ID: {chat.id}\n\n"
             f"Теперь отправьте ссылку на **группу обсуждения**.\n"
             f"Бот и вы должны быть администраторами группы.\n\n"
@@ -520,7 +520,7 @@ async def process_group_link(message: types.Message, state: FSMContext):
         
         # Проверяем, что это группа
         if chat.type not in ['group', 'supergroup']:
-            await message.answer("❌ Это не группа. Пожалуйста, отправьте ссылку на группу обсуждения.")
+            await message.answer("Это не группа. Пожалуйста, отправьте ссылку на группу обсуждения.")
             return
         
         # Проверяем, что бот - администратор
@@ -528,13 +528,13 @@ async def process_group_link(message: types.Message, state: FSMContext):
             bot_member = await bot.get_chat_member(chat.id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 await message.answer(
-                    f"❌ Бот не является администратором группы {chat.title}.\n"
+                    f"Бот не является администратором группы {chat.title}.\n"
                     f"Добавьте бота в администраторы и попробуйте снова."
                 )
                 return
         except Exception:
             await message.answer(
-                f"❌ Не удалось проверить права бота.\n"
+                f"Не удалось проверить права бота.\n"
                 f"Убедитесь, что бот добавлен в администраторы группы {chat.title}."
             )
             return
@@ -544,13 +544,13 @@ async def process_group_link(message: types.Message, state: FSMContext):
             user_member = await bot.get_chat_member(chat.id, message.from_user.id)
             if user_member.status not in ['administrator', 'creator']:
                 await message.answer(
-                    f"❌ Вы не являетесь администратором группы {chat.title}.\n"
+                    f"Вы не являетесь администратором группы {chat.title}.\n"
                     f"Пожалуйста, выберите группу, где вы администратор."
                 )
                 return
         except Exception:
             await message.answer(
-                f"❌ Не удалось проверить ваши права.\n"
+                f"Не удалось проверить ваши права.\n"
                 f"Убедитесь, что вы являетесь администратором группы {chat.title}."
             )
             return
@@ -568,14 +568,14 @@ async def process_group_link(message: types.Message, state: FSMContext):
         
         if settings and settings.get("channel_id"):
             await message.answer(
-                f"✅ Настройки завершены!\n\n"
+                f"Настройки завершены\n\n"
                 f"Канал: {settings['channel_id']}\n"
                 f"Группа: {chat.id}\n\n"
                 f"Теперь используйте /check"
             )
         else:
             await message.answer(
-                f"✅ Группа выбрана: {chat.title}\n"
+                f"Группа выбрана: {chat.title}\n"
                 f"ID: {chat.id}\n\n"
                 f"Сначала выберите канал. Повторите /setup"
             )
@@ -644,7 +644,7 @@ async def check_command(message: types.Message):
     
     if channel_id_or_username != settings["channel_id"]:
         await message.answer(
-            f"❌ Это не ваш канал.\n\n"
+            f"Это не ваш канал.\n\n"
             f"Ваш канал: {settings['channel_id']}\n"
             f"Убедитесь, что ссылка ведёт на правильный канал."
         )
@@ -672,7 +672,7 @@ async def check_command(message: types.Message):
         time_str = f"{hours} часов"
     
     await message.answer(
-        f"✅ Задача создана\n\n"
+        f"Задача создана\n\n"
         f"Пост: {post_url}\n"
         f"Жду {time_str}\n"
         f"Готово: {datetime.fromtimestamp(deadline).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -711,7 +711,7 @@ async def cancel(message: types.Message):
     
     if post_id in tasks and tasks[post_id].get("user_id") == message.from_user.id:
         del tasks[post_id]
-        await message.answer(f"✅ Задача для поста {post_id} отменена")
+        await message.answer(f"Задача для поста {post_id} отменена")
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
@@ -832,7 +832,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
     result = await clean_channel_from_list(data["user_id"], data["user_ids_list"], update_progress)
     
     report = (
-        f"ГОТОВО!\n\n"
+        f"ГОТОВО\n\n"
         f"Пост: {data['post_link']}\n"
         f"Не отметилось: {data['total_count']}\n"
         f"Удалено из канала: {result['success']}\n"
@@ -888,7 +888,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     to_kick = list(members - commenters)
     
     if not to_kick:
-        await bot.send_message(reply_chat_id, f"✅ Пост {post_link}\nВсе отметились!")
+        await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились")
         return
     
     # Кикаем из группы
