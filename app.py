@@ -630,6 +630,7 @@ async def check_command(message: types.Message):
         await message.answer("Часы должны быть числом (целым или дробным, например 0.25)")
         return
     
+    saved_channel_id = settings["channel_id"]
     channel_id_or_username, post_id = parse_post_url(post_url)
     
     if channel_id_or_username is None or post_id is None:
@@ -642,11 +643,37 @@ async def check_command(message: types.Message):
         )
         return
     
-    if channel_id_or_username != settings["channel_id"]:
+    # Пытаемся получить числовой ID канала по username
+    actual_channel_id = channel_id_or_username
+    if isinstance(actual_channel_id, str):
+        # Это username канала, нужно получить его числовой ID
+        try:
+            chat = await bot.get_chat(f"@{actual_channel_id}")
+            actual_channel_id = chat.id
+        except Exception as e:
+            await message.answer(f"Не удалось получить информацию о канале {actual_channel_id}. Убедитесь, что ссылка верна.")
+            return
+    
+    # Сравниваем ID
+    if actual_channel_id != saved_channel_id:
+        # Пытаемся получить название канала для понятного сообщения
+        channel_name = str(saved_channel_id)
+        try:
+            chat = await bot.get_chat(saved_channel_id)
+            channel_name = chat.title
+        except:
+            pass
+        
         await message.answer(
-            f"Это не ваш канал.\n\n"
-            f"Ваш канал: {settings['channel_id']}\n"
-            f"Убедитесь, что ссылка ведёт на правильный канал."
+            f"Канал в ссылке не совпадает с настроенным каналом.\n\n"
+            f"Настроенный канал: {channel_name} (ID: {saved_channel_id})\n"
+            f"Канал из ссылки: ID: {actual_channel_id}\n\n"
+            f"Если вы используете другой канал, выполните /setup для его настройки.\n"
+            f"Если это тот же канал, проблема в несовпадении ID.\n\n"
+            f"Попробуйте:\n"
+            f"1. Узнать правильный ID канала через @userinfobot\n"
+            f"2. Выполнить /setup {actual_channel_id} ID_группы\n"
+            f"3. Или используйте /setup (без аргументов) для настройки по ссылке"
         )
         return
     
@@ -679,7 +706,7 @@ async def check_command(message: types.Message):
     )
     
     asyncio.create_task(process_post(post_id, deadline, message.chat.id, post_url, message.from_user.id))
-
+    
 @dp.message(Command("status"))
 async def status(message: types.Message):
     user_tasks = {pid: data for pid, data in tasks.items() if data.get("user_id") == message.from_user.id}
