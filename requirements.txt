@@ -1,5 +1,4 @@
 aiogram
 flask
 python-dotenv
-pyrogram
-tgcrypto
+telethon
