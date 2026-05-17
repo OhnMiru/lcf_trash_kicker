@@ -68,6 +68,7 @@ class AuthState(StatesGroup):
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
+    waiting_for_resend = State()  # Новое состояние для повторной отправки
 
 # ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
 def get_settings(user_id: int):
@@ -238,16 +239,52 @@ async def process_phone(message: types.Message, state: FSMContext):
     try:
         await client.send_code_request(phone)
         await state.update_data(client=client)
+        
+        # Кнопка для повторной отправки кода
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Повторно отправить код", callback_data="resend_code")]
+        ])
+        
         await message.answer(
             "Код отправлен!\n\n"
             "Шаг 4 из 5: Введите код подтверждения из Telegram\n"
+            "Код действителен 3 минуты. Если не пришёл - нажмите кнопку ниже.\n\n"
             "Пример: 12345\n\n"
-            "Для отмены: /cancel"
+            "Для отмены: /cancel",
+            reply_markup=keyboard
         )
         await state.set_state(AuthState.waiting_for_code)
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
         await state.clear()
+
+@dp.callback_query(lambda c: c.data == "resend_code")
+async def resend_code(callback: types.CallbackQuery, state: FSMContext):
+    # Получаем текущее состояние
+    current_state = await state.get_state()
+    if current_state != AuthState.waiting_for_code:
+        await callback.answer("Сначала начните авторизацию заново с /login")
+        return
+    
+    data = await state.get_data()
+    client = data.get('client')
+    phone = data.get('phone')
+    
+    if not client:
+        await callback.answer("Сессия потеряна. Начните заново с /login")
+        return
+    
+    try:
+        await client.send_code_request(phone)
+        await callback.message.edit_text(
+            "Код отправлен повторно!\n\n"
+            "Шаг 4 из 5: Введите код подтверждения из Telegram\n"
+            "Пример: 12345\n\n"
+            "Для отмены: /cancel"
+        )
+        await callback.answer("Код отправлен")
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}")
 
 @dp.message(AuthState.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
@@ -285,7 +322,12 @@ async def process_code(message: types.Message, state: FSMContext):
         
     except Exception as e:
         error_text = str(e).lower()
-        if "password" in error_text or "2fa" in error_text:
+        if "phone code expired" in error_text or "code expired" in error_text:
+            await message.answer(
+                "Код устарел. Нажмите кнопку 'Повторно отправить код' под предыдущим сообщением,\n"
+                "чтобы получить новый код, или начните заново с /login"
+            )
+        elif "password" in error_text or "2fa" in error_text:
             await message.answer(
                 "Шаг 5 из 5: Введите пароль двухфакторной аутентификации\n\n"
                 "Для отмены: /cancel"
