@@ -21,7 +21,7 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MINI_APP_URL = "https://telegram-auth-app.onrender.com"  # Замените на ваш URL
+MINI_APP_URL = "https://lcf-trash-kicker-bot.onrender.com/"  # Замените на ваш URL
 
 # Создаём Flask приложение
 app = Flask(__name__)
