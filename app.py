@@ -90,16 +90,20 @@ def save_settings(user_id: int, channel_id: int = None, group_id: int = None, se
 def save_api_data(user_id: int, api_id: int, api_hash: str):
     settings = get_settings(user_id)
     session_string = settings.get("session_string") if settings else None
+    channel_id = settings.get("channel_id") if settings else None
+    group_id = settings.get("group_id") if settings else None
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
-                   (user_id, None, None, session_string, api_id, api_hash))
+                   (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
 
 def save_session(user_id: int, session_string: str):
     settings = get_settings(user_id)
     api_id = settings.get("api_id") if settings else None
     api_hash = settings.get("api_hash") if settings else None
+    channel_id = settings.get("channel_id") if settings else None
+    group_id = settings.get("group_id") if settings else None
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
-                   (user_id, None, None, session_string, api_id, api_hash))
+                   (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
 
 async def get_telethon_client(user_id: int):
@@ -165,7 +169,7 @@ async def start(message: types.Message):
 async def cmd_login(message: types.Message, state: FSMContext):
     await message.answer(
         "АВТОРИЗАЦИЯ\n\n"
-        "Шаг 1 из 4: Введите ваш API ID\n"
+        "Шаг 1 из 2: Введите ваш API ID\n"
         "(число с сайта my.telegram.org -> API Development Tools)\n\n"
         "Пример: 1234567\n\n"
         "Для отмены: /cancel"
@@ -183,7 +187,7 @@ async def process_api_id(message: types.Message, state: FSMContext):
         api_id = int(message.text.strip())
         await state.update_data(api_id=api_id)
         await message.answer(
-            "Шаг 2 из 4: Введите ваш API HASH\n"
+            "Шаг 2 из 2: Введите ваш API HASH\n"
             "(строка с сайта my.telegram.org)\n\n"
             "Пример: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6\n\n"
             "Для отмены: /cancel"
@@ -200,11 +204,11 @@ async def process_api_hash(message: types.Message, state: FSMContext):
         return
     
     api_hash = message.text.strip()
-    await state.update_data(api_hash=api_hash)
+    data = await state.get_data()
+    api_id = data.get("api_id")
     
     # Сохраняем API данные
-    data = await state.get_data()
-    save_api_data(message.from_user.id, data["api_id"], api_hash)
+    save_api_data(message.from_user.id, api_id, api_hash)
     
     # Создаём кнопку для отправки контакта
     keyboard = ReplyKeyboardMarkup(
@@ -218,31 +222,31 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     keyboard.add(contact_button)
     
     await message.answer(
-        "Шаг 3 из 4: Нажмите кнопку ниже, чтобы поделиться номером телефона.\n"
+        "API данные сохранены!\n\n"
+        "Нажмите на кнопку ниже, чтобы поделиться номером телефона.\n"
         "Telegram сам отправит ваш номер боту.\n\n"
         "Это нужно для авторизации.",
         reply_markup=keyboard
     )
-    # Ожидаем контакт (не меняем состояние, обработаем в отдельном хендлере)
-    await state.update_data(waiting_for_contact=True)
+    await state.clear()
+    # Сохраняем в state флаг, что ждём контакт
+    await state.update_data(waiting_for_contact=True, api_id=api_id, api_hash=api_hash)
 
 @dp.message(lambda message: message.contact is not None)
 async def handle_contact(message: types.Message, state: FSMContext):
-    # Проверяем, что мы ждём контакт
     data = await state.get_data()
     if not data.get("waiting_for_contact"):
-        # Если не ждём контакт, просто игнорируем
-        return
+        # Если не ждём контакт, но пользователь отправил - всё равно обработаем
+        pass
     
     phone_number = message.contact.phone_number
-    await state.update_data(phone=phone_number)
     
     await message.answer(
-        f"Шаг 4 из 4: Создаю сессию для номера {phone_number}...",
+        f"Создаю сессию для номера {phone_number}...",
         reply_markup=types.ReplyKeyboardRemove()
     )
     
-    # Получаем API данные
+    # Получаем API данные из базы
     settings = get_settings(message.from_user.id)
     if not settings or not settings.get("api_id"):
         await message.answer("Ошибка: API данные не найдены. Начните заново с /login")
@@ -279,6 +283,13 @@ async def handle_contact(message: types.Message, state: FSMContext):
                 "Для отмены: /cancel"
             )
             await state.set_state(AuthState.waiting_for_code)
+        elif "password" in error_text or "2fa" in error_text:
+            await state.update_data(client=client, phone=phone_number)
+            await message.answer(
+                "Введите пароль двухфакторной аутентификации.\n\n"
+                "Для отмены: /cancel"
+            )
+            await state.set_state(AuthState.waiting_for_password)
         else:
             await message.answer(f"Ошибка: {e}")
             await state.clear()
