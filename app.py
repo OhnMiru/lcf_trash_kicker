@@ -176,13 +176,13 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🤖 **Бот для автоматической чистки канала**\n\n"
+        "**Бот для автоматической чистки канала**\n\n"
         "**Команды:**\n"
         "/login - авторизовать аккаунт Telegram (один раз)\n"
         "/setup [ID_канала] [ID_группы] - настроить канал и группу\n"
         "/check [ссылка_на_пост] [часы] - запустить проверку\n"
-        "/status - показать активные задачи\n"
-        "/cancel [id_поста] - отменить задачу\n"
+        "/status - показать активные проверки\n"
+        "/cancel [id_поста] - отменить проверку\n"
         "/mysettings - показать текущие настройки\n\n"
         "**Порядок действий:**\n"
         "1. /login — ввести API ID, API HASH, номер телефона, код\n"
@@ -194,7 +194,7 @@ async def start(message: types.Message):
 @dp.message(Command("login"))
 async def cmd_login(message: types.Message, state: FSMContext):
     await message.answer(
-        "🔐 **Авторизация аккаунта Telegram**\n\n"
+        "**Авторизация аккаунта Telegram**\n\n"
         "**Шаг 1 из 5:** Введите ваш API ID\n"
         "(число с сайта my.telegram.org → API Development Tools)\n\n"
         "Пример: `1234567`\n\n"
@@ -207,7 +207,7 @@ async def cmd_login(message: types.Message, state: FSMContext):
 async def process_api_id(message: types.Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Авторизация отменена")
+        await message.answer("Авторизация отменена")
         return
     
     try:
@@ -222,13 +222,13 @@ async def process_api_id(message: types.Message, state: FSMContext):
         )
         await state.set_state(AuthState.waiting_for_api_hash)
     except ValueError:
-        await message.answer("❌ API ID должен быть числом. Попробуйте снова.")
+        await message.answer("API ID должен быть числом. Попробуйте снова.")
 
 @dp.message(AuthState.waiting_for_api_hash)
 async def process_api_hash(message: types.Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Авторизация отменена")
+        await message.answer("Авторизация отменена")
         return
     
     api_hash = message.text.strip()
@@ -247,7 +247,7 @@ async def process_api_hash(message: types.Message, state: FSMContext):
 async def process_phone(message: types.Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Авторизация отменена")
+        await message.answer("Авторизация отменена")
         return
     
     phone_number = message.text.strip()
@@ -276,7 +276,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         cmd_login.pending_auth = pending_auth
         
         await message.answer(
-            "✅ **Код подтверждения отправлен!**\n\n"
+            "**Код подтверждения отправлен!**\n\n"
             "**Шаг 4 из 5:** Введите код, который пришёл вам в Telegram\n"
             "(обычно 5 цифр)\n\n"
             "Пример: `12345`\n\n"
@@ -286,14 +286,14 @@ async def process_phone(message: types.Message, state: FSMContext):
         await state.set_state(AuthState.waiting_for_code)
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}\nПроверьте номер и попробуйте снова")
+        await message.answer(f"Ошибка: {e}\nПроверьте номер и попробуйте снова")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Авторизация отменена")
+        await message.answer("Авторизация отменена")
         return
     
     code = message.text.strip()
@@ -301,7 +301,7 @@ async def process_code(message: types.Message, state: FSMContext):
     user_data = pending_auth.get(message.from_user.id)
     
     if not user_data:
-        await message.answer("❌ Сессия не найдена. Начните заново с /login")
+        await message.answer("Сессия не найдена. Начните заново с /login")
         await state.clear()
         return
     
@@ -331,7 +331,7 @@ async def process_code(message: types.Message, state: FSMContext):
         del pending_auth[message.from_user.id]
         
         await message.answer(
-            "✅ **Авторизация успешно завершена!**\n\n"
+            "**Авторизация успешно завершена!**\n\n"
             "Теперь выполните /setup для настройки канала и группы.\n\n"
             "Пример: `/setup -1001234567890 -1009876543210`",
             parse_mode="Markdown"
@@ -339,14 +339,14 @@ async def process_code(message: types.Message, state: FSMContext):
         await state.clear()
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}\nПопробуйте снова /login")
+        await message.answer(f"Ошибка: {e}\nПопробуйте снова /login")
         await state.clear()
 
 @dp.message(AuthState.waiting_for_2fa)
 async def process_2fa(message: types.Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Авторизация отменена")
+        await message.answer("Авторизация отменена")
         return
     
     password = message.text.strip()
@@ -354,7 +354,7 @@ async def process_2fa(message: types.Message, state: FSMContext):
     user_data = pending_auth.get(message.from_user.id)
     
     if not user_data:
-        await message.answer("❌ Сессия не найдена. Начните заново с /login")
+        await message.answer("Сессия не найдена. Начните заново с /login")
         await state.clear()
         return
     
@@ -370,7 +370,7 @@ async def process_2fa(message: types.Message, state: FSMContext):
         del pending_auth[message.from_user.id]
         
         await message.answer(
-            "✅ **Авторизация успешно завершена!**\n\n"
+            "**Авторизация успешно завершена!**\n\n"
             "Теперь выполните /setup для настройки канала и группы.\n\n"
             "Пример: `/setup -1001234567890 -1009876543210`",
             parse_mode="Markdown"
@@ -378,16 +378,16 @@ async def process_2fa(message: types.Message, state: FSMContext):
         await state.clear()
         
     except Exception as e:
-        await message.answer(f"❌ Неверный пароль: {e}\nПопробуйте снова")
+        await message.answer(f"Неверный пароль: {e}\nПопробуйте снова")
 
 @dp.message(Command("setup"))
 async def setup_command(message: types.Message):
     args = message.text.split()
     if len(args) != 3:
         await message.answer(
-            "❌ Использование: /setup ID_канала ID_группы\n\n"
+            "Использование: /setup ID_канала ID_группы\n\n"
             "Пример: `/setup -1001234567890 -1009876543210`\n\n"
-            "👉 Как получить ID: перешлите сообщение из канала/группы боту @userinfobot",
+            "Как получить ID: перешлите сообщение из канала/группы боту @userinfobot",
             parse_mode="Markdown"
         )
         return
@@ -396,20 +396,20 @@ async def setup_command(message: types.Message):
         channel_id = int(args[1])
         group_id = int(args[2])
     except ValueError:
-        await message.answer("❌ ID должны быть числами")
+        await message.answer("ID должны быть числами")
         return
     
     # Проверяем, что пользователь авторизован
     if not get_user_api(message.from_user.id):
-        await message.answer("❌ Сначала выполните /login для авторизации")
+        await message.answer("Сначала выполните /login для авторизации")
         return
     
     save_settings(message.from_user.id, channel_id, group_id)
     
     await message.answer(
-        f"✅ **Настройки сохранены!**\n\n"
-        f"📌 Канал: `{channel_id}`\n"
-        f"📌 Группа: `{group_id}`\n\n"
+        f"**Настройки сохранены!**\n\n"
+        f"Канал: `{channel_id}`\n"
+        f"Группа: `{group_id}`\n\n"
         f"Теперь используйте /check",
         parse_mode="Markdown"
     )
@@ -423,23 +423,23 @@ async def mysettings(message: types.Message):
     text = "📋 **Ваши настройки:**\n\n"
     
     if settings:
-        text += f"📌 Канал: `{settings['channel_id']}`\n"
-        text += f"📌 Группа: `{settings['group_id']}`\n"
+        text += f"Канал: `{settings['channel_id']}`\n"
+        text += f"Группа: `{settings['group_id']}`\n"
     else:
-        text += "📌 Канал: не настроен\n"
-        text += "📌 Группа: не настроена\n"
+        text += "Канал: не настроен\n"
+        text += "Группа: не настроена\n"
     
     if api_data:
-        text += f"🔑 API ID: `{api_data['api_id']}`\n"
+        text += f"API ID: `{api_data['api_id']}`\n"
     else:
-        text += "🔑 API ID: не указан\n"
+        text += "API ID: не указан\n"
     
-    text += f"🔐 Сессия: {'✅ активна' if session_exists else '❌ не активна'}\n\n"
+    text += f"Сессия: {'активна' if session_exists else 'не активна'}\n\n"
     
     if not api_data:
-        text += "⚠️ Выполните /login для авторизации\n"
+        text += "Выполните /login для авторизации\n"
     if not settings:
-        text += "⚠️ Выполните /setup для настройки канала и группы"
+        text += "Выполните /setup для настройки канала и группы"
     
     await message.answer(text, parse_mode="Markdown")
 
@@ -447,24 +447,24 @@ async def mysettings(message: types.Message):
 async def check_command(message: types.Message):
     settings = get_settings(message.from_user.id)
     if not settings:
-        await message.answer("❌ Сначала выполните /setup")
+        await message.answer("Сначала выполните /setup")
         return
     
     api_data = get_user_api(message.from_user.id)
     if not api_data:
-        await message.answer("❌ Сначала выполните /login для авторизации")
+        await message.answer("Сначала выполните /login для авторизации")
         return
     
     args = message.text.split()
     if len(args) < 3:
-        await message.answer("❌ Использование:\n/check https://t.me/c/123/456 24")
+        await message.answer("Использование:\n/check https://t.me/c/123/456 24")
         return
     
     post_url = args[1]
     try:
         hours = int(args[2])
     except ValueError:
-        await message.answer("❌ Часы должны быть числом")
+        await message.answer("Часы должны быть числом")
         return
     
     try:
@@ -472,11 +472,11 @@ async def check_command(message: types.Message):
         channel_from_url = int("-100" + parts[0])
         post_id = int(parts[1])
     except Exception:
-        await message.answer("❌ Неверный формат ссылки.\nПример: https://t.me/c/1234567890/456")
+        await message.answer("Неверный формат ссылки.\nПример: https://t.me/c/1234567890/456")
         return
     
     if channel_from_url != settings["channel_id"]:
-        await message.answer(f"❌ Это не ваш канал. Ваш ID канала: {settings['channel_id']}")
+        await message.answer(f"Это не ваш канал. Ваш ID канала: {settings['channel_id']}")
         return
     
     deadline = asyncio.get_event_loop().time() + hours * 3600
@@ -490,10 +490,10 @@ async def check_command(message: types.Message):
     }
     
     await message.answer(
-        f"✅ **Задача создана**\n\n"
-        f"📌 Пост: {post_url}\n"
-        f"⏱ Жду {hours} часов\n"
-        f"🕒 Готово: {datetime.fromtimestamp(deadline).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"**Задача создана**\n\n"
+        f"Пост: {post_url}\n"
+        f"Жду {hours} часов\n"
+        f"Готово: {datetime.fromtimestamp(deadline).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"Через {hours} часов я:\n"
         f"• Кикну неотметившихся из группы\n"
         f"• Пришлю список и спрошу подтверждение\n"
@@ -511,7 +511,7 @@ async def status(message: types.Message):
         await message.answer("Нет активных задач")
         return
     
-    text = "📋 **Ваши активные задачи:**\n\n"
+    text = "**Ваши активные задачи:**\n\n"
     for pid, data in user_tasks.items():
         remaining = int(data["deadline"] - asyncio.get_event_loop().time())
         hours_left = remaining // 3600
@@ -535,7 +535,7 @@ async def cancel(message: types.Message):
     
     if post_id in tasks and tasks[post_id].get("user_id") == message.from_user.id:
         del tasks[post_id]
-        await message.answer(f"✅ Задача для поста {post_id} отменена")
+        await message.answer(f"Задача для поста {post_id} отменена")
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
@@ -545,15 +545,15 @@ async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
     
     if temp_id not in pending_cleanups:
-        await callback.answer("❌ Данные устарели", show_alert=True)
+        await callback.answer("Данные устарели", show_alert=True)
         await callback.message.delete()
         return
     
     pending_cleanups[temp_id]["editing"] = True
     
     await callback.message.edit_text(
-        f"✏️ **Режим редактирования списка**\n\n"
-        f"📊 Всего в списке: {pending_cleanups[temp_id]['total_count']} человек\n\n"
+        f"**Режим редактирования списка**\n\n"
+        f"Всего в списке: {pending_cleanups[temp_id]['total_count']} человек\n\n"
         f"**Исключить пользователей:**\n"
         f"Отправьте ID пользователей, которых НЕ нужно удалять.\n"
         f"Можно указать несколько: через запятую, пробел или каждый с новой строки.\n\n"
@@ -587,7 +587,7 @@ async def process_exclude_list(message: types.Message):
             exclude_ids.add(int(item))
     
     if not exclude_ids:
-        await message.answer("❌ Не найдено ни одного корректного ID. Попробуйте снова.")
+        await message.answer("Не найдено ни одного корректного ID. Попробуйте снова.")
         return
     
     original_ids = set(active_data["user_ids_list"])
@@ -620,21 +620,21 @@ async def process_exclude_list(message: types.Message):
         list_text += f"\n\n... и ещё {len(new_ids) - 30} человек"
     
     confirm_text = (
-        f"⚠️ **Требуется подтверждение**\n\n"
-        f"📌 Пост: {active_data['post_link']}\n"
-        f"👥 Не отметилось: {len(new_ids)} человек"
+        f"**Требуется подтверждение**\n\n"
+        f"Пост: {active_data['post_link']}\n"
+        f"Не отметилось: {len(new_ids)} человек"
     )
     
     if len(new_ids) != len(original_ids):
-        confirm_text += f"\n\n(✏️ Исключено {len(original_ids) - len(new_ids)} человек)"
+        confirm_text += f"\n\n(Исключено {len(original_ids) - len(new_ids)} человек)"
     
-    confirm_text += f"\n\n**Список ID для удаления:**\n{list_text}\n\n❗️ Удалить этих пользователей из канала?"
+    confirm_text += f"\n\n**Список ID для удаления:**\n{list_text}\n\nУдалить этих пользователей из канала?"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Удалить всех", callback_data=f"confirm_yes_{active_temp_id}"),
-            InlineKeyboardButton(text="✏️ Изменить ещё", callback_data=f"edit_{active_temp_id}"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data=f"confirm_no_{active_temp_id}")
+            InlineKeyboardButton(text="Удалить всех", callback_data=f"confirm_yes_{active_temp_id}"),
+            InlineKeyboardButton(text="Изменить ещё", callback_data=f"edit_{active_temp_id}"),
+            InlineKeyboardButton(text="Отмена", callback_data=f"confirm_no_{active_temp_id}")
         ]
     ])
     
@@ -651,7 +651,7 @@ async def cancel_edit(message: types.Message):
     for temp_id, data in pending_cleanups.items():
         if data.get("editing") and data.get("user_id") == message.from_user.id:
             data["editing"] = False
-            await message.answer("❌ Редактирование отменено. Список не изменился.")
+            await message.answer("Редактирование отменено. Список не изменился.")
             return
     
     await message.answer("Нет активного редактирования")
@@ -661,31 +661,31 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[2]
     
     if temp_id not in pending_cleanups:
-        await callback.answer("❌ Данные устарели", show_alert=True)
+        await callback.answer("Данные устарели", show_alert=True)
         await callback.message.delete()
         return
     
     data = pending_cleanups[temp_id]
     
     if data["total_count"] == 0:
-        await callback.message.edit_text("✅ Список пуст — некого удалять")
+        await callback.message.edit_text("Список пуст — некого удалять")
         del pending_cleanups[temp_id]
         await callback.answer()
         return
     
-    await callback.message.edit_text("⏳ Удаляю пользователей из канала...")
+    await callback.message.edit_text("Удаляю пользователей из канала...")
     
     async def update_progress(current, total):
-        await callback.message.edit_text(f"⏳ Удаляю... {current}/{total} ({current*100//total}%)")
+        await callback.message.edit_text(f"Удаляю... {current}/{total} ({current*100//total}%)")
     
     result = await clean_channel_from_list(data["user_id"], data["user_ids_list"], update_progress)
     
     report = (
-        f"✅ **Удаление из канала завершено**\n\n"
-        f"📌 Пост: {data['post_link']}\n"
-        f"📊 Не отметилось: {data['total_count']}\n"
-        f"🚫 Удалено из канала: {result['success']}\n"
-        f"⚠️ Ошибок: {result['errors']}\n"
+        f"**Удаление из канала завершено**\n\n"
+        f"Пост: {data['post_link']}\n"
+        f"Не отметилось: {data['total_count']}\n"
+        f"Удалено из канала: {result['success']}\n"
+        f"Ошибок: {result['errors']}\n"
     )
     
     await callback.message.edit_text(report, parse_mode="Markdown")
@@ -697,16 +697,16 @@ async def handle_confirm_no(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[2]
     
     if temp_id not in pending_cleanups:
-        await callback.answer("❌ Данные устарели", show_alert=True)
+        await callback.answer("Данные устарели", show_alert=True)
         await callback.message.delete()
         return
     
     data = pending_cleanups[temp_id]
     
     await callback.message.edit_text(
-        f"❌ **Удаление отменено**\n\n"
-        f"📌 Пост: {data['post_link']}\n"
-        f"👥 Не отметилось: {data['total_count']} человек\n"
+        f"**Удаление отменено**\n\n"
+        f"Пост: {data['post_link']}\n"
+        f"Не отметилось: {data['total_count']} человек\n"
         f"CSV-файл с ID сохранён выше.",
         parse_mode="Markdown"
     )
@@ -717,7 +717,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
-        await bot.send_message(reply_chat_id, "❌ Настройки не найдены")
+        await bot.send_message(reply_chat_id, "Настройки не найдены")
         return
     
     wait_seconds = deadline - asyncio.get_event_loop().time()
@@ -734,7 +734,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
             if msg.reply_to_message and msg.reply_to_message.message_id == post_id:
                 commenters.add(msg.from_user.id)
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"❌ Ошибка сбора комментаторов: {e}")
+        await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
     
     # Собираем участников группы
@@ -744,13 +744,13 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
             if not member.user.is_bot:
                 members.add(member.user.id)
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"❌ Ошибка сбора участников группы: {e}")
+        await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
         return
     
     to_kick = list(members - commenters)
     
     if not to_kick:
-        await bot.send_message(reply_chat_id, f"✅ Пост {post_link}\nВсе отметились!")
+        await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились!")
         return
     
     # Кикаем из группы
@@ -766,7 +766,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     await bot.send_message(
         settings["group_id"],
-        f"🧹 **Чистка группы**\nПост: {post_link}\nКикнуто из группы: {kicked_group}",
+        f"**Чистка группы**\nПост: {post_link}\nКикнуто из группы: {kicked_group}",
         parse_mode="Markdown"
     )
     
@@ -804,18 +804,18 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     }
     
     confirm_text = (
-        f"⚠️ **Требуется подтверждение**\n\n"
-        f"📌 Пост: {post_link}\n"
-        f"👥 Не отметилось: {len(to_kick)} человек\n\n"
+        f"**Требуется подтверждение**\n\n"
+        f"Пост: {post_link}\n"
+        f"Не отметилось: {len(to_kick)} человек\n\n"
         f"**Список ID для удаления:**\n{list_text}\n\n"
-        f"❗️ Удалить этих пользователей из канала?"
+        f"Удалить этих пользователей из канала?"
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Удалить всех", callback_data=f"confirm_yes_{temp_id}"),
-            InlineKeyboardButton(text="✏️ Изменить список", callback_data=f"edit_{temp_id}"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data=f"confirm_no_{temp_id}")
+            InlineKeyboardButton(text="Удалить всех", callback_data=f"confirm_yes_{temp_id}"),
+            InlineKeyboardButton(text="Изменить список", callback_data=f"edit_{temp_id}"),
+            InlineKeyboardButton(text="Отмена", callback_data=f"confirm_no_{temp_id}")
         ]
     ])
     
@@ -853,7 +853,7 @@ if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.start()
     
-    print("✅ Бот запущен и готов к работе")
+    print("Бот запущен и готов к работе")
     
     # Запускаем Flask
     port = int(os.environ.get("PORT", 5000))
