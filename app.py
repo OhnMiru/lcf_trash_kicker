@@ -21,11 +21,12 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+MINI_APP_URL = "https://telegram-auth-app.onrender.com"  # Замените на ваш URL
 
-# Адрес вашего Mini App (ЗАМЕНИТЕ НА ВАШ РЕАЛЬНЫЙ URL)
-MINI_APP_URL = "https://lcf-trash-kicker-bot.onrender.com/"
-
+# Создаём Flask приложение
 app = Flask(__name__)
+
+# Создаём бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -43,14 +44,6 @@ cursor.execute("""
         session_string TEXT
     )
 """)
-
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS pending_auth (
-        user_id INTEGER PRIMARY KEY,
-        session_string TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-""")
 conn.commit()
 
 # Глобальные переменные
@@ -58,7 +51,7 @@ telethon_clients = {}
 tasks = {}
 pending_cleanups = {}
 
-# ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
+# ========== ФУНКЦИИ ==========
 def get_settings(user_id: int):
     cursor.execute("SELECT channel_id, group_id, session_string FROM settings WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -90,7 +83,7 @@ async def get_telethon_client(user_id: int):
     if not settings or not settings.get("session_string"):
         return None
     
-    client = TelegramClient(StringSession(settings["session_string"]), 0, "")  # API ключи уже в сессии
+    client = TelegramClient(StringSession(settings["session_string"]), 0, "")
     await client.start()
     telethon_clients[user_id] = client
     return client
@@ -128,7 +121,7 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     
     return {"success": success, "errors": errors, "total": len(user_ids)}
 
-# ========== ОБРАБОТЧИК СЕССИИ ОТ MINI APP ==========
+# ========== ОБРАБОТЧИК СЕССИИ ==========
 @dp.message(lambda message: message.text and message.text.startswith("SESSION:"))
 async def handle_session_string(message: types.Message):
     session_string = message.text.replace("SESSION:", "").strip()
@@ -138,8 +131,7 @@ async def handle_session_string(message: types.Message):
         await message.answer(
             "Авторизация успешна!\n\n"
             "Теперь выполните /setup для настройки канала и группы.\n"
-            "Пример: /setup -1001234567890 -1009876543210\n\n"
-            "Как получить ID: перешлите сообщение из канала и группы боту @userinfobot"
+            "Пример: /setup -1001234567890 -1009876543210"
         )
     else:
         await message.answer("Ошибка: получена неверная сессионная строка")
@@ -173,8 +165,6 @@ async def cmd_login(message: types.Message):
         "1. API ID (число с my.telegram.org)\n"
         "2. API HASH (строка с my.telegram.org)\n"
         "3. Номер телефона в формате +79001234567\n\n"
-        "После ввода номера Telegram пришлёт код.\n"
-        "Введите код в открывшемся окне.\n\n"
         "Это нужно сделать один раз.",
         reply_markup=keyboard
     )
@@ -185,8 +175,7 @@ async def setup_command(message: types.Message):
     if len(args) != 3:
         await message.answer(
             "Использование: /setup ID_канала ID_группы\n"
-            "Пример: /setup -1001234567890 -1009876543210\n\n"
-            "Как получить ID: перешлите сообщение из канала/группы боту @userinfobot"
+            "Пример: /setup -1001234567890 -1009876543210"
         )
         return
     
@@ -252,11 +241,11 @@ async def check_command(message: types.Message):
         channel_from_url = int("-100" + parts[0])
         post_id = int(parts[1])
     except Exception:
-        await message.answer("Неверный формат ссылки. Пример: https://t.me/c/1234567890/456")
+        await message.answer("Неверный формат ссылки")
         return
     
     if channel_from_url != settings["channel_id"]:
-        await message.answer(f"Это не ваш канал. Ваш ID канала: {settings['channel_id']}")
+        await message.answer(f"Это не ваш канал. Ваш ID: {settings['channel_id']}")
         return
     
     deadline = asyncio.get_event_loop().time() + hours * 3600
@@ -313,7 +302,7 @@ async def cancel(message: types.Message):
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
-# ========== КОЛБЭКИ ДЛЯ РЕДАКТИРОВАНИЯ СПИСКА ==========
+# ========== КОЛБЭКИ ==========
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
@@ -327,9 +316,7 @@ async def handle_edit(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"РЕЖИМ РЕДАКТИРОВАНИЯ\n\n"
         f"Всего в списке: {pending_cleanups[temp_id]['total_count']} человек\n\n"
-        f"Отправьте ID пользователей, которых нужно исключить\n"
-        f"Пример: 123456789, 987654321\n\n"
-        f"Для отмены: /cancel_edit"
+        f"Отправьте ID для исключения\nПример: 123456789, 987654321"
     )
 
 @dp.message(lambda message: message.text and not message.text.startswith("/"))
@@ -384,7 +371,7 @@ async def process_exclude_list(message: types.Message):
     if len(new_ids) != len(original_ids):
         confirm_text += f"\n(Исключено {len(original_ids) - len(new_ids)})"
     
-    confirm_text += f"\n\nСписок:\n{list_text}\n\nУдалить этих пользователей из канала?"
+    confirm_text += f"\n\nСписок:\n{list_text}\n\nУдалить из канала?"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -418,11 +405,11 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
     data = pending_cleanups[temp_id]
     
     if data["total_count"] == 0:
-        await callback.message.edit_text("Список пуст — некого удалять")
+        await callback.message.edit_text("Список пуст")
         del pending_cleanups[temp_id]
         return
     
-    await callback.message.edit_text("Удаляю пользователей из канала...")
+    await callback.message.edit_text("Удаляю...")
     
     async def update_progress(current, total):
         await callback.message.edit_text(f"Удаляю... {current}/{total} ({current*100//total}%)")
@@ -433,7 +420,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
         f"ГОТОВО!\n\n"
         f"Пост: {data['post_link']}\n"
         f"Не отметилось: {data['total_count']}\n"
-        f"Удалено из канала: {result['success']}\n"
+        f"Удалено: {result['success']}\n"
         f"Ошибок: {result['errors']}"
     )
     
@@ -449,7 +436,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ПОСТА ==========
+# ========== ОСНОВНАЯ ЛОГИКА ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
@@ -463,33 +450,30 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     if post_id in tasks:
         del tasks[post_id]
     
-    # Собираем комментаторов
     commenters = set()
     try:
         async for msg in bot.get_chat_history(settings["channel_id"], limit=1000):
             if msg.reply_to_message and msg.reply_to_message.message_id == post_id:
                 commenters.add(msg.from_user.id)
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
+        await bot.send_message(reply_chat_id, f"Ошибка: {e}")
         return
     
-    # Собираем участников группы
     members = set()
     try:
         async for member in bot.get_chat_members(settings["group_id"]):
             if not member.user.is_bot:
                 members.add(member.user.id)
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
+        await bot.send_message(reply_chat_id, f"Ошибка: {e}")
         return
     
     to_kick = list(members - commenters)
     
     if not to_kick:
-        await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились!")
+        await bot.send_message(reply_chat_id, f"Все отметились!")
         return
     
-    # Кикаем из группы
     kicked_group = 0
     for uid in to_kick:
         try:
@@ -502,7 +486,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     await bot.send_message(settings["group_id"], f"Кикнуто из группы: {kicked_group}")
     
-    # Готовим CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["user_id"])
@@ -510,7 +493,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         writer.writerow([uid])
     csv_bytes = output.getvalue().encode("utf-8")
     
-    # Формируем список для показа
     user_lines = []
     for uid in to_kick[:30]:
         try:
@@ -522,7 +504,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     list_text = "\n".join(user_lines)
     if len(to_kick) > 30:
-        list_text += f"\n\n... и ещё {len(to_kick) - 30} человек"
+        list_text += f"\n\n... и ещё {len(to_kick) - 30}"
     
     temp_id = f"{post_id}_{int(asyncio.get_event_loop().time())}"
     pending_cleanups[temp_id] = {
@@ -538,14 +520,13 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         f"ПОДТВЕРЖДЕНИЕ\n\n"
         f"Пост: {post_link}\n"
         f"Не отметилось: {len(to_kick)}\n\n"
-        f"Список:\n{list_text}\n\n"
-        f"Удалить этих пользователей из канала?"
+        f"Список:\n{list_text}\n\nУдалить из канала?"
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="ДА", callback_data=f"confirm_yes_{temp_id}"),
-            InlineKeyboardButton(text="ИЗМЕНИТЬ СПИСОК", callback_data=f"edit_{temp_id}"),
+            InlineKeyboardButton(text="ИЗМЕНИТЬ", callback_data=f"edit_{temp_id}"),
             InlineKeyboardButton(text="НЕТ", callback_data=f"confirm_no_{temp_id}")
         ]
     ])
@@ -553,9 +534,14 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     await bot.send_document(reply_chat_id, types.BufferedInputFile(csv_bytes, filename=f"to_kick_{post_id}.csv"))
     await bot.send_message(reply_chat_id, confirm_text, reply_markup=keyboard)
 
-# ========== FLASK ДЛЯ RENDER ==========
+# ========== FLASK ДЛЯ RENDER (МИНИМАЛЬНЫЙ) ==========
+@app.route('/')
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok", "bot": "running"})
+
 def run_flask():
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 async def main():
