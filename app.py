@@ -1,10 +1,21 @@
+# ========== КРИТИЧЕСКИ ВАЖНО: создаём event loop ДО импорта pyrogram ==========
 import asyncio
+import threading
+import sys
+
+# Принудительно создаём event loop для основного потока
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+# Теперь можно импортировать остальное
 import io
 import csv
 import sqlite3
 import os
 import re
-import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
@@ -15,13 +26,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from pyrogram import Client
 from dotenv import load_dotenv
-
-# Важно: создаём event loop для основного потока
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
 load_dotenv()
 
@@ -37,7 +41,6 @@ dp = Dispatcher(storage=storage)
 conn = sqlite3.connect("settings.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Таблица настроек пользователей
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         user_id INTEGER PRIMARY KEY,
@@ -46,7 +49,6 @@ cursor.execute("""
     )
 """)
 
-# Таблица API-данных пользователей
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_api (
         user_id INTEGER PRIMARY KEY,
@@ -55,7 +57,6 @@ cursor.execute("""
     )
 """)
 
-# Таблица сессий Pyrogram
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS sessions (
         user_id INTEGER PRIMARY KEY,
@@ -183,24 +184,20 @@ async def start(message: types.Message):
     await message.answer(
         "🤖 **Бот для автоматической чистки канала**\n\n"
         "**Команды:**\n"
-        "/login - авторизовать аккаунт Telegram (один раз)\n"
-        "/setup [ID_канала] [ID_группы] - настроить канал и группу\n"
-        "/check [ссылка_на_пост] [часы] - запустить проверку\n"
-        "/status - показать активные задачи\n"
-        "/cancel [id_поста] - отменить задачу\n"
-        "/mysettings - показать текущие настройки\n\n"
-        "**Порядок действий:**\n"
-        "1. /login\n"
-        "2. /setup\n"
-        "3. /check",
+        "/login - авторизовать аккаунт (один раз)\n"
+        "/setup [ID_канала] [ID_группы] - настроить\n"
+        "/check [ссылка] [часы] - запустить проверку\n"
+        "/status - активные задачи\n"
+        "/cancel [id_поста] - отменить\n"
+        "/mysettings - текущие настройки\n\n"
+        "**Порядок:** /login → /setup → /check",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("login"))
 async def cmd_login(message: types.Message, state: FSMContext):
     await message.answer(
-        "🔐 **Авторизация**\n\n"
-        "**Шаг 1 из 5:** Введите API ID (с my.telegram.org)\n"
+        "🔐 **Шаг 1 из 5:** Введите API ID (с my.telegram.org)\n"
         "Пример: `1234567`\n\n"
         "Для отмены: /cancel",
         parse_mode="Markdown"
@@ -219,7 +216,7 @@ async def process_api_id(message: types.Message, state: FSMContext):
         await state.update_data(api_id=api_id)
         await message.answer(
             "**Шаг 2 из 5:** Введите API HASH\n"
-            "Пример: `a1b2c3d4e5f6g7h8i9j0...`",
+            "Пример: `a1b2c3d4e5f6g7h8...`",
             parse_mode="Markdown"
         )
         await state.set_state(AuthState.waiting_for_api_hash)
@@ -276,8 +273,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         
         await message.answer(
             "✅ **Код отправлен!**\n\n"
-            "**Шаг 4 из 5:** Введите код из Telegram\n"
-            "Пример: `12345`",
+            "**Шаг 4 из 5:** Введите код из Telegram",
             parse_mode="Markdown"
         )
         await state.set_state(AuthState.waiting_for_code)
@@ -419,6 +415,7 @@ async def mysettings(message: types.Message):
     
     if api_data:
         text += f"🔑 API ID: `{api_data['api_id']}`\n"
+        text += f"🔐 Сессия: активна\n"
     else:
         text += "🔑 Авторизация: не выполнена\n"
     
@@ -751,10 +748,10 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     await bot.send_document(reply_chat_id, types.BufferedInputFile(csv_bytes, filename=f"to_kick_{post_id}.csv"))
     await bot.send_message(reply_chat_id, confirm_text, parse_mode="Markdown", reply_markup=keyboard)
 
-# ========== FLASK ==========
+# ========== FLASK ДЛЯ RENDER ==========
 @app.route('/')
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "message": "Bot is running"})
 
 @app.route('/health')
 def health_check():
@@ -763,13 +760,14 @@ def health_check():
 def run_bot():
     asyncio.run(dp.start_polling(bot))
 
+# ========== ЗАПУСК ==========
 if __name__ == "__main__":
     cmd_login.pending_auth = {}
     
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.start()
     
-    print("✅ Бот запущен")
+    print("✅ Бот запущен и готов к работе")
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
