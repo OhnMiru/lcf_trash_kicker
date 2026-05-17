@@ -9,7 +9,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -21,8 +21,6 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MINI_APP_URL = "https://telegram-auth-app.onrender.com"  # Замените на ваш URL
-
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -38,7 +36,9 @@ cursor.execute("""
         user_id INTEGER PRIMARY KEY,
         channel_id INTEGER,
         group_id INTEGER,
-        session_string TEXT
+        session_string TEXT,
+        api_id INTEGER,
+        api_hash TEXT
     )
 """)
 conn.commit()
@@ -48,32 +48,58 @@ telethon_clients = {}
 tasks = {}
 pending_cleanups = {}
 
-# Свой event loop для Telethon в отдельном потоке
-telethon_loop = None
-telethon_thread = None
+# Состояния для авторизации
+class AuthState(StatesGroup):
+    waiting_for_api_id = State()
+    waiting_for_api_hash = State()
+    waiting_for_code = State()
+    waiting_for_password = State()
 
-# ========== ФУНКЦИИ ==========
+# ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
 def get_settings(user_id: int):
-    cursor.execute("SELECT channel_id, group_id, session_string FROM settings WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT channel_id, group_id, session_string, api_id, api_hash FROM settings WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if row:
-        return {"channel_id": row[0], "group_id": row[1], "session_string": row[2]}
+        return {
+            "channel_id": row[0],
+            "group_id": row[1],
+            "session_string": row[2],
+            "api_id": row[3],
+            "api_hash": row[4]
+        }
     return None
 
-def save_settings(user_id: int, channel_id: int, group_id: int, session_string: str = None):
+def save_settings(user_id: int, channel_id: int = None, group_id: int = None, session_string: str = None, api_id: int = None, api_hash: str = None):
     existing = get_settings(user_id)
-    if existing and session_string is None:
-        session_string = existing.get("session_string")
-    cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string) VALUES (?, ?, ?, ?)",
-                   (user_id, channel_id, group_id, session_string))
+    if existing:
+        if channel_id is None:
+            channel_id = existing.get("channel_id")
+        if group_id is None:
+            group_id = existing.get("group_id")
+        if session_string is None:
+            session_string = existing.get("session_string")
+        if api_id is None:
+            api_id = existing.get("api_id")
+        if api_hash is None:
+            api_hash = existing.get("api_hash")
+    
+    cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user_id, channel_id, group_id, session_string, api_id, api_hash))
+    conn.commit()
+
+def save_api_data(user_id: int, api_id: int, api_hash: str):
+    settings = get_settings(user_id)
+    session_string = settings.get("session_string") if settings else None
+    cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user_id, None, None, session_string, api_id, api_hash))
     conn.commit()
 
 def save_session(user_id: int, session_string: str):
     settings = get_settings(user_id)
-    if settings:
-        cursor.execute("UPDATE settings SET session_string = ? WHERE user_id = ?", (session_string, user_id))
-    else:
-        cursor.execute("INSERT INTO settings (user_id, session_string) VALUES (?, ?)", (user_id, session_string))
+    api_id = settings.get("api_id") if settings else None
+    api_hash = settings.get("api_hash") if settings else None
+    cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user_id, None, None, session_string, api_id, api_hash))
     conn.commit()
 
 async def get_telethon_client(user_id: int):
@@ -122,21 +148,6 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     
     return {"success": success, "errors": errors, "total": len(user_ids)}
 
-# ========== ОБРАБОТЧИК СЕССИИ ==========
-@dp.message(lambda message: message.text and message.text.startswith("SESSION:"))
-async def handle_session_string(message: types.Message):
-    session_string = message.text.replace("SESSION:", "").strip()
-    
-    if len(session_string) > 50:
-        save_session(message.from_user.id, session_string)
-        await message.answer(
-            "Авторизация успешна!\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n"
-            "Пример: /setup -1001234567890 -1009876543210"
-        )
-    else:
-        await message.answer("Ошибка: получена неверная сессионная строка")
-
 # ========== КОМАНДЫ БОТА ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -151,24 +162,196 @@ async def start(message: types.Message):
     )
 
 @dp.message(Command("login"))
-async def cmd_login(message: types.Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="Войти через Telegram",
-            web_app=types.WebAppInfo(url=MINI_APP_URL)
-        )]
-    ])
-    
+async def cmd_login(message: types.Message, state: FSMContext):
     await message.answer(
         "АВТОРИЗАЦИЯ\n\n"
-        "Нажмите на кнопку ниже, чтобы открыть окно авторизации.\n\n"
-        "Что нужно ввести:\n"
-        "1. API ID (число с my.telegram.org)\n"
-        "2. API HASH (строка с my.telegram.org)\n"
-        "3. Номер телефона в формате +79001234567\n\n"
-        "Это нужно сделать один раз.",
+        "Шаг 1 из 4: Введите ваш API ID\n"
+        "(число с сайта my.telegram.org -> API Development Tools)\n\n"
+        "Пример: 1234567\n\n"
+        "Для отмены: /cancel"
+    )
+    await state.set_state(AuthState.waiting_for_api_id)
+
+@dp.message(AuthState.waiting_for_api_id)
+async def process_api_id(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено")
+        return
+    
+    try:
+        api_id = int(message.text.strip())
+        await state.update_data(api_id=api_id)
+        await message.answer(
+            "Шаг 2 из 4: Введите ваш API HASH\n"
+            "(строка с сайта my.telegram.org)\n\n"
+            "Пример: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6\n\n"
+            "Для отмены: /cancel"
+        )
+        await state.set_state(AuthState.waiting_for_api_hash)
+    except ValueError:
+        await message.answer("Ошибка: API ID должен быть числом")
+
+@dp.message(AuthState.waiting_for_api_hash)
+async def process_api_hash(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено")
+        return
+    
+    api_hash = message.text.strip()
+    await state.update_data(api_hash=api_hash)
+    
+    # Сохраняем API данные
+    data = await state.get_data()
+    save_api_data(message.from_user.id, data["api_id"], api_hash)
+    
+    # Создаём кнопку для отправки контакта
+    keyboard = ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    contact_button = KeyboardButton(
+        text="Поделиться номером телефона",
+        request_contact=True
+    )
+    keyboard.add(contact_button)
+    
+    await message.answer(
+        "Шаг 3 из 4: Нажмите кнопку ниже, чтобы поделиться номером телефона.\n"
+        "Telegram сам отправит ваш номер боту.\n\n"
+        "Это нужно для авторизации.",
         reply_markup=keyboard
     )
+    # Ожидаем контакт (не меняем состояние, обработаем в отдельном хендлере)
+    await state.update_data(waiting_for_contact=True)
+
+@dp.message(lambda message: message.contact is not None)
+async def handle_contact(message: types.Message, state: FSMContext):
+    # Проверяем, что мы ждём контакт
+    data = await state.get_data()
+    if not data.get("waiting_for_contact"):
+        # Если не ждём контакт, просто игнорируем
+        return
+    
+    phone_number = message.contact.phone_number
+    await state.update_data(phone=phone_number)
+    
+    await message.answer(
+        f"Шаг 4 из 4: Создаю сессию для номера {phone_number}...",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    
+    # Получаем API данные
+    settings = get_settings(message.from_user.id)
+    if not settings or not settings.get("api_id"):
+        await message.answer("Ошибка: API данные не найдены. Начните заново с /login")
+        await state.clear()
+        return
+    
+    client = TelegramClient(StringSession(), settings["api_id"], settings["api_hash"])
+    await client.connect()
+    
+    try:
+        # Пытаемся войти с номером
+        await client.sign_in(phone_number)
+        # Если код не потребовался, сессия готова
+        session_string = StringSession.save(client.session)
+        save_session(message.from_user.id, session_string)
+        await client.disconnect()
+        
+        await message.answer(
+            "Авторизация успешна!\n\n"
+            "Теперь выполните /setup для настройки канала и группы.\n"
+            "Пример: /setup -1001234567890 -1009876543210\n\n"
+            "Как получить ID: перешлите сообщение из канала/группы боту @userinfobot"
+        )
+        await state.clear()
+        
+    except Exception as e:
+        error_text = str(e).lower()
+        if "phone code" in error_text or "code" in error_text:
+            # Нужен код подтверждения
+            await state.update_data(client=client, phone=phone_number)
+            await message.answer(
+                "Введите код подтверждения, который пришёл вам в Telegram.\n"
+                "Пример: 12345\n\n"
+                "Для отмены: /cancel"
+            )
+            await state.set_state(AuthState.waiting_for_code)
+        else:
+            await message.answer(f"Ошибка: {e}")
+            await state.clear()
+
+@dp.message(AuthState.waiting_for_code)
+async def process_code(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено")
+        return
+    
+    code = message.text.strip()
+    data = await state.get_data()
+    client = data.get('client')
+    phone = data.get('phone')
+    
+    if not client:
+        await message.answer("Сессия потеряна. Начните заново с /login")
+        await state.clear()
+        return
+    
+    try:
+        await client.sign_in(phone, code)
+        session_string = StringSession.save(client.session)
+        save_session(message.from_user.id, session_string)
+        await client.disconnect()
+        
+        await message.answer(
+            "Авторизация успешна!\n\n"
+            "Теперь выполните /setup для настройки канала и группы.\n"
+            "Пример: /setup -1001234567890 -1009876543210"
+        )
+        await state.clear()
+        
+    except Exception as e:
+        error_text = str(e).lower()
+        if "password" in error_text or "2fa" in error_text:
+            await message.answer(
+                "Введите пароль двухфакторной аутентификации.\n\n"
+                "Для отмены: /cancel"
+            )
+            await state.set_state(AuthState.waiting_for_password)
+            await state.update_data(client=client, phone=phone)
+        else:
+            await message.answer(f"Ошибка: {e}")
+            await state.clear()
+
+@dp.message(AuthState.waiting_for_password)
+async def process_password(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено")
+        return
+    
+    password = message.text.strip()
+    data = await state.get_data()
+    client = data.get('client')
+    
+    try:
+        await client.sign_in(password=password)
+        session_string = StringSession.save(client.session)
+        save_session(message.from_user.id, session_string)
+        await client.disconnect()
+        
+        await message.answer(
+            "Авторизация успешна!\n\n"
+            "Теперь выполните /setup для настройки канала и группы.\n"
+            "Пример: /setup -1001234567890 -1009876543210"
+        )
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
 
 @dp.message(Command("setup"))
 async def setup_command(message: types.Message):
@@ -176,7 +359,8 @@ async def setup_command(message: types.Message):
     if len(args) != 3:
         await message.answer(
             "Использование: /setup ID_канала ID_группы\n"
-            "Пример: /setup -1001234567890 -1009876543210"
+            "Пример: /setup -1001234567890 -1009876543210\n\n"
+            "Как получить ID: перешлите сообщение из канала/группы боту @userinfobot"
         )
         return
     
@@ -192,7 +376,14 @@ async def setup_command(message: types.Message):
         await message.answer("Сначала выполните /login")
         return
     
-    save_settings(message.from_user.id, channel_id, group_id, settings.get("session_string"))
+    save_settings(
+        message.from_user.id,
+        channel_id=channel_id,
+        group_id=group_id,
+        session_string=settings.get("session_string"),
+        api_id=settings.get("api_id"),
+        api_hash=settings.get("api_hash")
+    )
     await message.answer(
         f"Настройки сохранены!\n\n"
         f"Канал: {channel_id}\n"
@@ -208,6 +399,7 @@ async def mysettings(message: types.Message):
     if settings:
         text += f"Канал: {settings['channel_id'] if settings['channel_id'] else 'не настроен'}\n"
         text += f"Группа: {settings['group_id'] if settings['group_id'] else 'не настроена'}\n"
+        text += f"API ID: {settings['api_id'] if settings['api_id'] else 'не указан'}\n"
         text += f"Авторизация: {'выполнена' if settings['session_string'] else 'не выполнена'}\n"
     else:
         text += "Настройки не найдены. Выполните /login и /setup"
@@ -242,11 +434,11 @@ async def check_command(message: types.Message):
         channel_from_url = int("-100" + parts[0])
         post_id = int(parts[1])
     except Exception:
-        await message.answer("Неверный формат ссылки")
+        await message.answer("Неверный формат ссылки. Пример: https://t.me/c/1234567890/456")
         return
     
     if channel_from_url != settings["channel_id"]:
-        await message.answer(f"Это не ваш канал. Ваш ID: {settings['channel_id']}")
+        await message.answer(f"Это не ваш канал. Ваш ID канала: {settings['channel_id']}")
         return
     
     deadline = asyncio.get_event_loop().time() + hours * 3600
@@ -303,7 +495,7 @@ async def cancel(message: types.Message):
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
-# ========== КОЛБЭКИ ==========
+# ========== КОЛБЭКИ ДЛЯ РЕДАКТИРОВАНИЯ ==========
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
@@ -317,7 +509,9 @@ async def handle_edit(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"РЕЖИМ РЕДАКТИРОВАНИЯ\n\n"
         f"Всего в списке: {pending_cleanups[temp_id]['total_count']} человек\n\n"
-        f"Отправьте ID для исключения\nПример: 123456789, 987654321"
+        f"Отправьте ID пользователей, которых нужно исключить\n"
+        f"Пример: 123456789, 987654321\n\n"
+        f"Для отмены: /cancel_edit"
     )
 
 @dp.message(lambda message: message.text and not message.text.startswith("/"))
@@ -372,7 +566,7 @@ async def process_exclude_list(message: types.Message):
     if len(new_ids) != len(original_ids):
         confirm_text += f"\n(Исключено {len(original_ids) - len(new_ids)})"
     
-    confirm_text += f"\n\nСписок:\n{list_text}\n\nУдалить из канала?"
+    confirm_text += f"\n\nСписок:\n{list_text}\n\nУдалить этих пользователей из канала?"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -406,11 +600,11 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
     data = pending_cleanups[temp_id]
     
     if data["total_count"] == 0:
-        await callback.message.edit_text("Список пуст")
+        await callback.message.edit_text("Список пуст — некого удалять")
         del pending_cleanups[temp_id]
         return
     
-    await callback.message.edit_text("Удаляю...")
+    await callback.message.edit_text("Удаляю пользователей из канала...")
     
     async def update_progress(current, total):
         await callback.message.edit_text(f"Удаляю... {current}/{total} ({current*100//total}%)")
@@ -421,7 +615,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
         f"ГОТОВО!\n\n"
         f"Пост: {data['post_link']}\n"
         f"Не отметилось: {data['total_count']}\n"
-        f"Удалено: {result['success']}\n"
+        f"Удалено из канала: {result['success']}\n"
         f"Ошибок: {result['errors']}"
     )
     
@@ -437,7 +631,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ==========
+# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
@@ -451,30 +645,33 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     if post_id in tasks:
         del tasks[post_id]
     
+    # Собираем комментаторов
     commenters = set()
     try:
         async for msg in bot.get_chat_history(settings["channel_id"], limit=1000):
             if msg.reply_to_message and msg.reply_to_message.message_id == post_id:
                 commenters.add(msg.from_user.id)
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"Ошибка: {e}")
+        await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
     
+    # Собираем участников группы
     members = set()
     try:
         async for member in bot.get_chat_members(settings["group_id"]):
             if not member.user.is_bot:
                 members.add(member.user.id)
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"Ошибка: {e}")
+        await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
         return
     
     to_kick = list(members - commenters)
     
     if not to_kick:
-        await bot.send_message(reply_chat_id, f"Все отметились!")
+        await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились!")
         return
     
+    # Кикаем из группы
     kicked_group = 0
     for uid in to_kick:
         try:
@@ -487,6 +684,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     await bot.send_message(settings["group_id"], f"Кикнуто из группы: {kicked_group}")
     
+    # Готовим CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["user_id"])
@@ -494,6 +692,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         writer.writerow([uid])
     csv_bytes = output.getvalue().encode("utf-8")
     
+    # Формируем список для показа
     user_lines = []
     for uid in to_kick[:30]:
         try:
@@ -505,7 +704,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     list_text = "\n".join(user_lines)
     if len(to_kick) > 30:
-        list_text += f"\n\n... и ещё {len(to_kick) - 30}"
+        list_text += f"\n\n... и ещё {len(to_kick) - 30} человек"
     
     temp_id = f"{post_id}_{int(asyncio.get_event_loop().time())}"
     pending_cleanups[temp_id] = {
@@ -521,13 +720,14 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         f"ПОДТВЕРЖДЕНИЕ\n\n"
         f"Пост: {post_link}\n"
         f"Не отметилось: {len(to_kick)}\n\n"
-        f"Список:\n{list_text}\n\nУдалить из канала?"
+        f"Список:\n{list_text}\n\n"
+        f"Удалить этих пользователей из канала?"
     )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="ДА", callback_data=f"confirm_yes_{temp_id}"),
-            InlineKeyboardButton(text="ИЗМЕНИТЬ", callback_data=f"edit_{temp_id}"),
+            InlineKeyboardButton(text="ИЗМЕНИТЬ СПИСОК", callback_data=f"edit_{temp_id}"),
             InlineKeyboardButton(text="НЕТ", callback_data=f"confirm_no_{temp_id}")
         ]
     ])
@@ -535,7 +735,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     await bot.send_document(reply_chat_id, types.BufferedInputFile(csv_bytes, filename=f"to_kick_{post_id}.csv"))
     await bot.send_message(reply_chat_id, confirm_text, reply_markup=keyboard)
 
-# ========== FLASK (ВЕБ-ПРОСЛУШКА) ==========
+# ========== FLASK ДЛЯ RENDER ==========
 @app.route('/')
 @app.route('/health')
 def health():
@@ -545,16 +745,12 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
-# ========== ЗАПУСК БОТА ==========
 async def main():
     print("Бот запущен и готов к работе")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    
-    # Запускаем бота в основном потоке (aiogram сам управляет event loop)
     asyncio.run(main())
