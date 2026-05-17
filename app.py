@@ -210,16 +210,12 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     # Сохраняем API данные
     save_api_data(message.from_user.id, api_id, api_hash)
     
-    # Создаём кнопку для отправки контакта
+    # Исправленный способ создания клавиатуры для aiogram 3.x
     keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Поделиться номером телефона", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    contact_button = KeyboardButton(
-        text="Поделиться номером телефона",
-        request_contact=True
-    )
-    keyboard.add(contact_button)
     
     await message.answer(
         "API данные сохранены!\n\n"
