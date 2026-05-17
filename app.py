@@ -55,6 +55,30 @@ class AuthState(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
 
+# ========== ФУНКЦИЯ ПАРСИНГА ССЫЛОК ==========
+def parse_post_url(url: str):
+    import re
+    # Убираем https://, http://, telegram.me, t.me
+    clean_url = re.sub(r'https?://(telegram\.me|t\.me)/', '', url)
+    parts = clean_url.split('/')
+    
+    if len(parts) != 2:
+        return None, None
+    
+    channel_part = parts[0]
+    try:
+        post_id = int(parts[1])
+    except ValueError:
+        return None, None
+    
+    # Определяем тип ссылки
+    if channel_part.isdigit():
+        channel_id = int("-100" + channel_part)
+    else:
+        channel_id = channel_part
+    
+    return channel_id, post_id
+
 # ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
 def get_settings(user_id: int):
     cursor.execute("SELECT channel_id, group_id, session_string, api_id, api_hash FROM settings WHERE user_id = ?", (user_id,))
@@ -207,10 +231,8 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     data = await state.get_data()
     api_id = data.get("api_id")
     
-    # Сохраняем API данные
     save_api_data(message.from_user.id, api_id, api_hash)
     
-    # Исправленный способ создания клавиатуры для aiogram 3.x
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Поделиться номером телефона", request_contact=True)]],
         resize_keyboard=True,
@@ -225,14 +247,12 @@ async def process_api_hash(message: types.Message, state: FSMContext):
         reply_markup=keyboard
     )
     await state.clear()
-    # Сохраняем в state флаг, что ждём контакт
     await state.update_data(waiting_for_contact=True, api_id=api_id, api_hash=api_hash)
 
 @dp.message(lambda message: message.contact is not None)
 async def handle_contact(message: types.Message, state: FSMContext):
     data = await state.get_data()
     if not data.get("waiting_for_contact"):
-        # Если не ждём контакт, но пользователь отправил - всё равно обработаем
         pass
     
     phone_number = message.contact.phone_number
@@ -242,7 +262,6 @@ async def handle_contact(message: types.Message, state: FSMContext):
         reply_markup=types.ReplyKeyboardRemove()
     )
     
-    # Получаем API данные из базы
     settings = get_settings(message.from_user.id)
     if not settings or not settings.get("api_id"):
         await message.answer("Ошибка: API данные не найдены. Начните заново с /login")
@@ -253,9 +272,7 @@ async def handle_contact(message: types.Message, state: FSMContext):
     await client.connect()
     
     try:
-        # Пытаемся войти с номером
         await client.sign_in(phone_number)
-        # Если код не потребовался, сессия готова
         session_string = StringSession.save(client.session)
         save_session(message.from_user.id, session_string)
         await client.disconnect()
@@ -271,7 +288,6 @@ async def handle_contact(message: types.Message, state: FSMContext):
     except Exception as e:
         error_text = str(e).lower()
         if "phone code" in error_text or "code" in error_text:
-            # Нужен код подтверждения
             await state.update_data(client=client, phone=phone_number)
             await message.answer(
                 "Введите код подтверждения, который пришёл вам в Telegram.\n"
@@ -426,26 +442,42 @@ async def check_command(message: types.Message):
     
     args = message.text.split()
     if len(args) < 3:
-        await message.answer("Использование: /check https://t.me/c/123/456 24")
+        await message.answer(
+            "Использование: /check ссылка_на_пост часы\n\n"
+            "Примеры:\n"
+            "/check https://t.me/c/1234567890/456 24\n"
+            "/check https://t.me/mychannel/2 0.25\n"
+            "/check t.me/mychannel/2 1.5\n\n"
+            "Часы могут быть целыми или дробными (0.25 = 15 минут)"
+        )
         return
     
     post_url = args[1]
     try:
-        hours = int(args[2])
+        hours = float(args[2])
     except ValueError:
-        await message.answer("Часы должны быть числом")
+        await message.answer("Часы должны быть числом (целым или дробным, например 0.25)")
         return
     
-    try:
-        parts = post_url.replace("https://t.me/c/", "").split("/")
-        channel_from_url = int("-100" + parts[0])
-        post_id = int(parts[1])
-    except Exception:
-        await message.answer("Неверный формат ссылки. Пример: https://t.me/c/1234567890/456")
+    channel_id_or_username, post_id = parse_post_url(post_url)
+    
+    if channel_id_or_username is None or post_id is None:
+        await message.answer(
+            "Неверный формат ссылки.\n\n"
+            "Поддерживаются:\n"
+            "- https://t.me/c/1234567890/456\n"
+            "- https://t.me/username/2\n"
+            "- t.me/username/2"
+        )
         return
     
-    if channel_from_url != settings["channel_id"]:
-        await message.answer(f"Это не ваш канал. Ваш ID канала: {settings['channel_id']}")
+    # Проверка канала
+    if channel_id_or_username != settings["channel_id"]:
+        await message.answer(
+            f"Это не ваш канал.\n\n"
+            f"Ваш канал: {settings['channel_id']}\n"
+            f"Убедитесь, что ссылка ведёт на правильный канал."
+        )
         return
     
     deadline = asyncio.get_event_loop().time() + hours * 3600
@@ -458,10 +490,21 @@ async def check_command(message: types.Message):
         "user_id": message.from_user.id
     }
     
+    # Форматируем время для красивого вывода
+    if hours < 1:
+        minutes = int(hours * 60)
+        time_str = f"{minutes} минут"
+    elif hours == 1:
+        time_str = "1 час"
+    elif hours == int(hours):
+        time_str = f"{int(hours)} часов"
+    else:
+        time_str = f"{hours} часов"
+    
     await message.answer(
         f"Задача создана\n\n"
         f"Пост: {post_url}\n"
-        f"Жду {hours} часов\n"
+        f"Жду {time_str}\n"
         f"Готово: {datetime.fromtimestamp(deadline).strftime('%Y-%m-%d %H:%M:%S')}"
     )
     
@@ -502,7 +545,7 @@ async def cancel(message: types.Message):
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
-# ========== КОЛБЭКИ ДЛЯ РЕДАКТИРОВАНИЯ ==========
+# ========== КОЛБЭКИ ==========
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
@@ -638,7 +681,7 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ==========
+# ========== ОСНОВНАЯ ЛОГИКА ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
     settings = get_settings(user_id)
     if not settings:
@@ -652,7 +695,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     if post_id in tasks:
         del tasks[post_id]
     
-    # Собираем комментаторов
     commenters = set()
     try:
         async for msg in bot.get_chat_history(settings["channel_id"], limit=1000):
@@ -662,7 +704,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
     
-    # Собираем участников группы
     members = set()
     try:
         async for member in bot.get_chat_members(settings["group_id"]):
@@ -678,7 +719,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились!")
         return
     
-    # Кикаем из группы
     kicked_group = 0
     for uid in to_kick:
         try:
@@ -691,7 +731,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     await bot.send_message(settings["group_id"], f"Кикнуто из группы: {kicked_group}")
     
-    # Готовим CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["user_id"])
@@ -699,7 +738,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         writer.writerow([uid])
     csv_bytes = output.getvalue().encode("utf-8")
     
-    # Формируем список для показа
     user_lines = []
     for uid in to_kick[:30]:
         try:
@@ -742,7 +780,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     await bot.send_document(reply_chat_id, types.BufferedInputFile(csv_bytes, filename=f"to_kick_{post_id}.csv"))
     await bot.send_message(reply_chat_id, confirm_text, reply_markup=keyboard)
 
-# ========== FLASK ДЛЯ RENDER ==========
+# ========== FLASK ==========
 @app.route('/')
 @app.route('/health')
 def health():
