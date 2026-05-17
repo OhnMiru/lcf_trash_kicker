@@ -2,3 +2,5 @@ aiogram
 flask
 python-dotenv
 telethon
+aiohttp
+requests
