@@ -21,12 +21,9 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MINI_APP_URL = "https://lcf-trash-kicker-bot.onrender.com/"  # Замените на ваш URL
+MINI_APP_URL = "https://telegram-auth-app.onrender.com"  # Замените на ваш URL
 
-# Создаём Flask приложение
 app = Flask(__name__)
-
-# Создаём бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -50,6 +47,10 @@ conn.commit()
 telethon_clients = {}
 tasks = {}
 pending_cleanups = {}
+
+# Свой event loop для Telethon в отдельном потоке
+telethon_loop = None
+telethon_thread = None
 
 # ========== ФУНКЦИИ ==========
 def get_settings(user_id: int):
@@ -534,7 +535,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     await bot.send_document(reply_chat_id, types.BufferedInputFile(csv_bytes, filename=f"to_kick_{post_id}.csv"))
     await bot.send_message(reply_chat_id, confirm_text, reply_markup=keyboard)
 
-# ========== FLASK ДЛЯ RENDER (МИНИМАЛЬНЫЙ) ==========
+# ========== FLASK (ВЕБ-ПРОСЛУШКА) ==========
 @app.route('/')
 @app.route('/health')
 def health():
@@ -542,14 +543,18 @@ def health():
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
+# ========== ЗАПУСК БОТА ==========
 async def main():
     print("Бот запущен и готов к работе")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
+    
+    # Запускаем бота в основном потоке (aiogram сам управляет event loop)
     asyncio.run(main())
