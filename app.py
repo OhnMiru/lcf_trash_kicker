@@ -16,6 +16,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 import aiohttp
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,6 +24,13 @@ load_dotenv()
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_URL = os.getenv("RENDER_URL", "https://lcf-trash-kicker.onrender.com")
+
+# Принудительно удаляем вебхук при запуске
+try:
+    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
+    print("Вебхук удалён при запуске")
+except Exception as e:
+    print(f"Ошибка удаления вебхука: {e}")
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
@@ -151,7 +159,6 @@ def save_session(user_id: int, session_string: str):
     conn.commit()
 
 def restore_tasks_from_db():
-    """Восстанавливает активные задачи из базы данных при запуске бота"""
     cursor.execute("SELECT post_id, deadline, post_link, hours, user_id FROM active_tasks")
     rows = cursor.fetchall()
     
@@ -434,7 +441,6 @@ async def setup_command(message: types.Message, state: FSMContext):
     
     args = message.text.split()
     
-    # Если есть аргументы - ручной ввод ID
     if len(args) == 3:
         try:
             channel_id = int(args[1])
@@ -459,7 +465,6 @@ async def setup_command(message: types.Message, state: FSMContext):
         )
         return
     
-    # Если аргументов нет - настройка по ссылкам
     await message.answer(
         "НАСТРОЙКА КАНАЛА И ГРУППЫ\n\n"
         "Сначала отправьте ссылку на канал, где вы и бот являетесь администраторами.\n"
@@ -486,7 +491,6 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     try:
         chat = await bot.get_chat(f"@{username}")
         
-        # Проверяем, что бот - администратор
         try:
             bot_member = await bot.get_chat_member(chat.id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
@@ -502,7 +506,6 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             )
             return
         
-        # Проверяем, что пользователь - администратор
         try:
             user_member = await bot.get_chat_member(chat.id, message.from_user.id)
             if user_member.status not in ['administrator', 'creator']:
@@ -518,7 +521,6 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             )
             return
         
-        # Сохраняем канал
         settings = get_settings(message.from_user.id)
         save_settings(
             message.from_user.id,
@@ -558,12 +560,10 @@ async def process_group_link(message: types.Message, state: FSMContext):
     try:
         chat = await bot.get_chat(f"@{username}")
         
-        # Проверяем, что это группа
         if chat.type not in ['group', 'supergroup']:
             await message.answer("Это не группа. Пожалуйста, отправьте ссылку на группу обсуждения.")
             return
         
-        # Проверяем, что бот - администратор
         try:
             bot_member = await bot.get_chat_member(chat.id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
@@ -579,7 +579,6 @@ async def process_group_link(message: types.Message, state: FSMContext):
             )
             return
         
-        # Проверяем, что пользователь - администратор
         try:
             user_member = await bot.get_chat_member(chat.id, message.from_user.id)
             if user_member.status not in ['administrator', 'creator']:
@@ -595,7 +594,6 @@ async def process_group_link(message: types.Message, state: FSMContext):
             )
             return
         
-        # Сохраняем группу
         settings = get_settings(message.from_user.id)
         save_settings(
             message.from_user.id,
@@ -683,7 +681,6 @@ async def check_command(message: types.Message):
         )
         return
     
-    # Пытаемся получить числовой ID канала по username
     actual_channel_id = channel_id_or_username
     if isinstance(actual_channel_id, str):
         try:
@@ -693,7 +690,6 @@ async def check_command(message: types.Message):
             await message.answer(f"Не удалось получить информацию о канале {actual_channel_id}. Убедитесь, что ссылка верна.")
             return
     
-    # Сравниваем ID
     if actual_channel_id != saved_channel_id:
         channel_name = str(saved_channel_id)
         try:
@@ -725,16 +721,14 @@ async def check_command(message: types.Message):
         "user_id": message.from_user.id
     }
     
-    # Сохраняем задачу в базу данных
     cursor.execute("""
         INSERT OR REPLACE INTO active_tasks (post_id, deadline, post_link, hours, user_id)
         VALUES (?, ?, ?, ?, ?)
     """, (post_id, deadline, post_url, hours, message.from_user.id))
     conn.commit()
     
-    print(f"DEBUG: Задача создана для поста {post_id}, deadline = {deadline}, текущее время = {asyncio.get_event_loop().time()}")
+    print(f"DEBUG: Задача создана для поста {post_id}, deadline = {deadline}")
     
-    # Форматируем время
     if hours < 1:
         minutes = int(hours * 60)
         time_str = f"{minutes} минут"
@@ -932,7 +926,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     print(f"DEBUG: process_post запущена для поста {post_id}")
     print(f"DEBUG: deadline = {deadline}, текущее время = {asyncio.get_event_loop().time()}")
     
-    # Удаляем задачу из базы
     cursor.execute("DELETE FROM active_tasks WHERE post_id = ?", (post_id,))
     conn.commit()
     
@@ -951,28 +944,22 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     print(f"DEBUG: Начинаю сбор комментаторов для поста {post_id}")
     
-    # Получаем клиент Telethon для пользователя
     client = await get_telethon_client(user_id)
     if not client:
         await bot.send_message(reply_chat_id, "Ошибка: сессия Telethon не найдена. Выполните /login")
         return
     
-    # Собираем комментаторов через Telethon
     commenters = set()
     try:
-        # Получаем объект канала
         channel_entity = await client.get_entity(settings["channel_id"])
         
-        # Проверяем, существует ли пост
         message = await client.get_messages(channel_entity, ids=post_id)
         if not message:
             await bot.send_message(reply_chat_id, f"Пост с ID {post_id} не найден в канале")
             return
         
-        # Собираем все сообщения, которые являются ответами на этот пост
         async for reply in client.iter_messages(channel_entity, reply_to=post_id):
             if reply.from_id:
-                # Извлекаем user_id
                 if hasattr(reply.from_id, 'user_id'):
                     user_id_telethon = reply.from_id.user_id
                 else:
@@ -985,7 +972,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
     
-    # Собираем участников группы (через aiogram)
     members = set()
     try:
         async for member in bot.get_chat_members(settings["group_id"]):
@@ -1005,7 +991,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     print(f"DEBUG: Нужно кикнуть {len(to_kick)} человек")
     
-    # Кикаем из группы
     kicked_group = 0
     for uid in to_kick:
         try:
@@ -1018,7 +1003,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     await bot.send_message(settings["group_id"], f"Кикнуто из группы: {kicked_group}")
     
-    # Готовим CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["user_id"])
@@ -1026,7 +1010,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         writer.writerow([uid])
     csv_bytes = output.getvalue().encode("utf-8")
     
-    # Формируем список для показа
     user_lines = []
     for uid in to_kick[:30]:
         try:
@@ -1080,9 +1063,8 @@ def run_flask():
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 async def self_ping():
-    """Держит бота активным через внутренние пинги"""
     while True:
-        await asyncio.sleep(120)  # каждые 2 минуты
+        await asyncio.sleep(120)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{RENDER_URL}/health") as resp:
