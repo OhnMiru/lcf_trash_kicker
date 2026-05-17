@@ -22,11 +22,14 @@ load_dotenv()
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Публичные API ключи для Telethon (можно использовать любые)
+# Публичные API ключи для Telethon
 API_ID = 2496
 API_HASH = "8da85c0d2d427f5c63c9a438d164bedf"
 
+# Создаём Flask приложение (будет в фоновом потоке)
 app = Flask(__name__)
+
+# Создаём бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -91,7 +94,6 @@ async def get_telethon_client(user_id: int):
         return telethon_clients[user_id]
     
     session_string = get_session(user_id)
-    
     if not session_string:
         return None
     
@@ -633,24 +635,21 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     await bot.send_document(reply_chat_id, types.BufferedInputFile(csv_bytes, filename=f"to_kick_{post_id}.csv"))
     await bot.send_message(reply_chat_id, confirm_text, reply_markup=keyboard)
 
-# ========== FLASK ДЛЯ RENDER ==========
-@app.route('/')
-def health():
-    return jsonify({"status": "ok", "message": "Bot is running"})
-
-@app.route('/health')
-def health_check():
-    return jsonify({"status": "healthy"})
-
-def run_bot():
-    asyncio.run(dp.start_polling(bot))
-
-# ========== ЗАПУСК ==========
-if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-    
-    print("Bot started and ready")
-    
+# ========== FLASK ДЛЯ RENDER (ФОНОВЫЙ ПОТОК) ==========
+def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+# ========== ЗАПУСК (БОТ В ГЛАВНОМ ПОТОКЕ) ==========
+async def main():
+    print("Bot started and ready")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    # Запускаем Flask в фоновом потоке
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Запускаем бота в главном потоке
+    asyncio.run(main())
