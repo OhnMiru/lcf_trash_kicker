@@ -185,10 +185,6 @@ def restore_tasks_from_db():
 async def get_telethon_client(user_id: int):
     print(f"DEBUG: Пытаюсь получить клиент для user_id={user_id}")
     
-    if user_id in telethon_clients and telethon_clients[user_id].is_connected():
-        print(f"DEBUG: Клиент для user_id={user_id} уже существует и подключён")
-        return telethon_clients[user_id]
-    
     settings = get_settings(user_id)
     if not settings:
         print(f"DEBUG: Настройки для user_id={user_id} не найдены")
@@ -220,12 +216,6 @@ async def get_telethon_client(user_id: int):
         
     except Exception as e:
         print(f"Ошибка при запуске клиента для user_id={user_id}: {type(e).__name__}: {e}")
-        
-        if "StringSession" in str(e) or "EOF" in str(e) or "invalid" in str(e).lower():
-            print(f"DEBUG: Сессия повреждена, удаляем из БД для user_id={user_id}")
-            cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
-            conn.commit()
-        
         return None
 
 async def clean_channel_from_list(user_id: int, user_ids: list, progress_callback=None) -> dict:
@@ -272,7 +262,9 @@ async def start(message: types.Message):
         "/status - активные задачи\n"
         "/cancel ID_поста - отменить задачу\n"
         "/mysettings - текущие настройки\n"
-        "/check_session - диагностика сессии"
+        "/check_session - диагностика сессии\n"
+        "/test_session - тест работоспособности сессии\n"
+        "/reset_session - сброс сессии (если не работает)"
     )
 
 @dp.message(Command("login"))
@@ -355,6 +347,43 @@ async def check_session(message: types.Message):
         f"Группа: {settings.get('group_id') or 'не настроена'}\n\n"
         f"Если сессии нет, выполните /login заново"
     )
+
+@dp.message(Command("test_session"))
+async def test_session(message: types.Message):
+    """Прямой тест загруженной сессии"""
+    settings = get_settings(message.from_user.id)
+    if not settings:
+        await message.answer("Настройки не найдены. Сначала выполните /login")
+        return
+    
+    session_string = settings.get("session_string")
+    api_id = settings.get("api_id")
+    api_hash = settings.get("api_hash")
+    
+    if not session_string:
+        await message.answer("Сессия отсутствует в БД. Выполните /login")
+        return
+    
+    await message.answer(f"Тестирую сессию (длина: {len(session_string)})\nAPI ID: {api_id}")
+    
+    try:
+        client = TelegramClient(StringSession(session_string), api_id, api_hash)
+        await client.start(phone=lambda: None, password=lambda: None)
+        
+        me = await client.get_me()
+        await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name} (ID: {me.id})")
+        
+        await client.disconnect()
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}\n\nВыполните /reset_session, затем /login заново")
+
+@dp.message(Command("reset_session"))
+async def reset_session(message: types.Message):
+    """Сбрасывает сессию"""
+    cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (message.from_user.id,))
+    conn.commit()
+    await message.answer("Сессия сброшена. Теперь выполните /login заново")
 
 @dp.message(lambda message: message.contact is not None)
 async def handle_contact(message: types.Message, state: FSMContext):
