@@ -146,15 +146,21 @@ def save_api_data(user_id: int, api_id: int, api_hash: str):
     conn.commit()
 
 def save_session(user_id: int, session_string: str):
+    if not session_string:
+        print(f"ERROR: Попытка сохранить пустую сессию для user_id={user_id}")
+        return False
+    
     settings = get_settings(user_id)
     api_id = settings.get("api_id") if settings else None
     api_hash = settings.get("api_hash") if settings else None
     channel_id = settings.get("channel_id") if settings else None
     group_id = settings.get("group_id") if settings else None
+    
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
                    (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
     print(f"DEBUG: Сессия сохранена для user_id={user_id}, длина={len(session_string)}")
+    return True
 
 def restore_tasks_from_db():
     cursor.execute("SELECT post_id, deadline, post_link, hours, user_id FROM active_tasks")
@@ -190,11 +196,12 @@ async def get_telethon_client(user_id: int):
         print(f"DEBUG: Настройки для user_id={user_id} не найдены")
         return None
     
-    if not settings.get("session_string"):
+    session_string = settings.get("session_string")
+    if not session_string:
         print(f"DEBUG: session_string для user_id={user_id} отсутствует в БД")
         return None
     
-    print(f"DEBUG: session_string для user_id={user_id} найдена (длина: {len(settings['session_string'])})")
+    print(f"DEBUG: session_string для user_id={user_id} найдена (длина: {len(session_string)})")
     
     api_id = settings.get("api_id")
     api_hash = settings.get("api_hash")
@@ -206,7 +213,7 @@ async def get_telethon_client(user_id: int):
     print(f"DEBUG: API данные для user_id={user_id} найдены: api_id={api_id}")
     
     try:
-        client = TelegramClient(StringSession(settings["session_string"]), api_id, api_hash)
+        client = TelegramClient(StringSession(session_string), api_id, api_hash)
         await client.start(phone=lambda: None, password=lambda: None)
         
         me = await client.get_me()
@@ -335,7 +342,7 @@ async def check_session(message: types.Message):
         await message.answer("Настройки не найдены. Сначала выполните /login")
         return
     
-    has_session = bool(settings.get("session_string"))
+    has_session = settings.get("session_string") is not None and len(settings.get("session_string", "")) > 0
     session_len = len(settings.get("session_string") or "")
     
     await message.answer(
