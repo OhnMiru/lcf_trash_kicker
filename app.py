@@ -154,6 +154,7 @@ def save_session(user_id: int, session_string: str):
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
                    (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
+    print(f"DEBUG: Сессия сохранена для user_id={user_id}, длина={len(session_string)}")
 
 def restore_tasks_from_db():
     cursor.execute("SELECT post_id, deadline, post_link, hours, user_id FROM active_tasks")
@@ -208,14 +209,10 @@ async def get_telethon_client(user_id: int):
     
     print(f"DEBUG: API данные для user_id={user_id} найдены: api_id={api_id}")
     
-    # Пробуем создать клиент
     try:
         client = TelegramClient(StringSession(settings["session_string"]), api_id, api_hash)
-        
-        # Запрещаем Telethon запрашивать ввод из консоли
         await client.start(phone=lambda: None, password=lambda: None)
         
-        # Проверяем, что клиент работает
         me = await client.get_me()
         print(f"DEBUG: Клиент для user_id={user_id} успешно запущен. Пользователь: {me.first_name}")
         telethon_clients[user_id] = client
@@ -224,7 +221,6 @@ async def get_telethon_client(user_id: int):
     except Exception as e:
         print(f"Ошибка при запуске клиента для user_id={user_id}: {type(e).__name__}: {e}")
         
-        # Если сессия повреждена, удаляем её из БД
         if "StringSession" in str(e) or "EOF" in str(e) or "invalid" in str(e).lower():
             print(f"DEBUG: Сессия повреждена, удаляем из БД для user_id={user_id}")
             cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
@@ -275,7 +271,8 @@ async def start(message: types.Message):
         "/check ссылка часы - запустить проверку\n"
         "/status - активные задачи\n"
         "/cancel ID_поста - отменить задачу\n"
-        "/mysettings - текущие настройки"
+        "/mysettings - текущие настройки\n"
+        "/check_session - диагностика сессии"
     )
 
 @dp.message(Command("login"))
@@ -338,6 +335,27 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     await state.clear()
     await state.update_data(waiting_for_contact=True, api_id=api_id, api_hash=api_hash)
 
+@dp.message(Command("check_session"))
+async def check_session(message: types.Message):
+    """Диагностическая команда для проверки сессии"""
+    settings = get_settings(message.from_user.id)
+    if not settings:
+        await message.answer("Настройки не найдены. Сначала выполните /login")
+        return
+    
+    has_session = bool(settings.get("session_string"))
+    session_len = len(settings.get("session_string") or "")
+    
+    await message.answer(
+        f"Диагностика сессии:\n\n"
+        f"Сессия в БД: {'есть' if has_session else 'нет'}\n"
+        f"Длина сессии: {session_len} символов\n"
+        f"API ID: {settings.get('api_id') or 'нет'}\n"
+        f"Канал: {settings.get('channel_id') or 'не настроен'}\n"
+        f"Группа: {settings.get('group_id') or 'не настроена'}\n\n"
+        f"Если сессии нет, выполните /login заново"
+    )
+
 @dp.message(lambda message: message.contact is not None)
 async def handle_contact(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -363,14 +381,28 @@ async def handle_contact(message: types.Message, state: FSMContext):
     try:
         await client.sign_in(phone_number)
         session_string = StringSession.save(client.session)
+        
+        if not session_string or len(session_string) < 10:
+            await message.answer("Ошибка: получена пустая сессия. Попробуйте ещё раз.")
+            await client.disconnect()
+            return
+        
         save_session(message.from_user.id, session_string)
+        
+        check_settings = get_settings(message.from_user.id)
+        if not check_settings or not check_settings.get("session_string"):
+            await message.answer("Ошибка: не удалось сохранить сессию в базу данных. Попробуйте ещё раз.")
+            await client.disconnect()
+            return
+        
         await client.disconnect()
         
         await message.answer(
-            "Авторизация успешна\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n\n"
-            "/setup - настроить канал и группу по ссылке\n"
-            "/setup ID_канала ID_группы - ввести ID вручную"
+            f"Авторизация успешна!\n\n"
+            f"Сессия сохранена (длина: {len(session_string)} символов)\n\n"
+            f"Теперь выполните /setup для настройки канала и группы.\n\n"
+            f"/setup - настроить канал и группу по ссылке\n"
+            f"/setup ID_канала ID_группы - ввести ID вручную"
         )
         await state.clear()
         
@@ -415,14 +447,21 @@ async def process_code(message: types.Message, state: FSMContext):
     try:
         await client.sign_in(phone, code)
         session_string = StringSession.save(client.session)
+        
+        if not session_string or len(session_string) < 10:
+            await message.answer("Ошибка: получена пустая сессия. Попробуйте ещё раз.")
+            await client.disconnect()
+            return
+        
         save_session(message.from_user.id, session_string)
         await client.disconnect()
         
         await message.answer(
-            "Авторизация успешна\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n\n"
-            "/setup - настроить канал и группу по ссылке\n"
-            "/setup ID_канала ID_группы - ввести ID вручную"
+            f"Авторизация успешна!\n\n"
+            f"Сессия сохранена (длина: {len(session_string)} символов)\n\n"
+            f"Теперь выполните /setup для настройки канала и группы.\n\n"
+            f"/setup - настроить канал и группу по ссылке\n"
+            f"/setup ID_канала ID_группы - ввести ID вручную"
         )
         await state.clear()
         
@@ -453,14 +492,21 @@ async def process_password(message: types.Message, state: FSMContext):
     try:
         await client.sign_in(password=password)
         session_string = StringSession.save(client.session)
+        
+        if not session_string or len(session_string) < 10:
+            await message.answer("Ошибка: получена пустая сессия. Попробуйте ещё раз.")
+            await client.disconnect()
+            return
+        
         save_session(message.from_user.id, session_string)
         await client.disconnect()
         
         await message.answer(
-            "Авторизация успешна\n\n"
-            "Теперь выполните /setup для настройки канала и группы.\n\n"
-            "/setup - настроить канал и группу по ссылке\n"
-            "/setup ID_канала ID_группы - ввести ID вручную"
+            f"Авторизация успешна!\n\n"
+            f"Сессия сохранена (длина: {len(session_string)} символов)\n\n"
+            f"Теперь выполните /setup для настройки канала и группы.\n\n"
+            f"/setup - настроить канал и группу по ссылке\n"
+            f"/setup ID_канала ID_группы - ввести ID вручную"
         )
         await state.clear()
         
