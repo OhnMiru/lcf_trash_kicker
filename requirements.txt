@@ -1,6 +1,5 @@
-aiogram
-flask
-python-dotenv
-telethon
-aiohttp
-requests
+aiogram==3.4.1
+flask==3.0.0
+telethon==2.0.0
+aiohttp==3.9.5
+requests==2.31.0
