@@ -214,7 +214,7 @@ async def get_telethon_client(user_id: int):
     
     try:
         client = TelegramClient(StringSession(session_string), api_id, api_hash)
-        await client.start(phone=lambda: None, password=lambda: None)
+        await client.start()
         
         me = await client.get_me()
         print(f"DEBUG: Клиент для user_id={user_id} успешно запущен. Пользователь: {me.first_name}")
@@ -375,7 +375,7 @@ async def test_session(message: types.Message):
     
     try:
         client = TelegramClient(StringSession(session_string), api_id, api_hash)
-        await client.start(phone=lambda: None, password=lambda: None)
+        await client.start()
         
         me = await client.get_me()
         await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name} (ID: {me.id})")
