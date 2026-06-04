@@ -379,38 +379,58 @@ async def process_api_id(message: types.Message, state: FSMContext):
 
 @dp.message(AuthState.waiting_for_api_hash)
 async def process_api_hash(message: types.Message, state: FSMContext):
+    if not message.text:
+        return
     if message.text.strip() == "/cancel":
         await state.clear()
-        await message.answer("Отменено")
+        await message.answer("Отменено", reply_markup=types.ReplyKeyboardRemove())
         return
     api_hash = message.text.strip()
     data = await state.get_data()
     await state.update_data(api_hash=api_hash)
     save_settings(message.from_user.id, api_id=data["api_id"], api_hash=api_hash)
+
+    phone_keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
     await message.answer(
-        "Шаг 3/4: Введите номер телефона (международный формат)\n\n"
-        "Пример: +79001234567\n\n"
-        "/cancel — отмена"
+        "Шаг 3/4: Отправьте номер телефона\n\n"
+        "Нажмите кнопку ниже или введите вручную: +79001234567\n\n"
+        "/cancel — отмена",
+        reply_markup=phone_keyboard,
     )
     await state.set_state(AuthState.waiting_for_phone)
 
 
 @dp.message(AuthState.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    if message.text.strip() == "/cancel":
+    # Отмена
+    if message.text and message.text.strip() == "/cancel":
         await state.clear()
-        await message.answer("Отменено")
+        await message.answer("Отменено", reply_markup=types.ReplyKeyboardRemove())
         return
-    phone = message.text.strip()
-    if not phone.startswith('+'):
-        await message.answer("Номер должен начинаться с '+'. Попробуйте ещё раз:")
+
+    # Получаем номер — из контакта (кнопка) или из текста
+    if message.contact:
+        phone = message.contact.phone_number
+        if not phone.startswith('+'):
+            phone = '+' + phone
+    elif message.text:
+        phone = message.text.strip()
+        if not phone.startswith('+'):
+            await message.answer("Номер должен начинаться с '+'. Попробуйте ещё раз:")
+            return
+    else:
+        await message.answer("Отправьте номер телефона или нажмите кнопку")
         return
 
     data = await state.get_data()
     api_id   = data["api_id"]
     api_hash = data["api_hash"]
 
-    await message.answer("Отправляю код подтверждения...")
+    await message.answer("Отправляю код подтверждения...", reply_markup=types.ReplyKeyboardRemove())
 
     try:
         client = Client("auth_temp", api_id=api_id, api_hash=api_hash, in_memory=True)
@@ -463,7 +483,7 @@ async def process_code(message: types.Message, state: FSMContext):
         return
 
     try:
-        await client.sign_in(phone=phone, phone_code=code, phone_code_hash=phone_code_hash)
+        await client.sign_in(phone, phone_code_hash, code)
         await _finalize_auth(message, state, client, api_id, api_hash)
 
     except Exception as e:
