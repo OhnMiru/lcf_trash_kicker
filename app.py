@@ -189,40 +189,38 @@ def restore_tasks_from_db():
     print(f"Восстановлено задач: {restored_count}")
 
 async def get_telethon_client(user_id: int):
-    print(f"DEBUG: Пытаюсь получить клиент для user_id={user_id}")
+    print(f"get_telethon_client для user_id={user_id}")
+    
+    if user_id in telethon_clients and telethon_clients[user_id].is_connected():
+        return telethon_clients[user_id]
     
     settings = get_settings(user_id)
-    if not settings:
-        print(f"DEBUG: Настройки для user_id={user_id} не найдены")
+    if not settings or not settings.get("session_string"):
         return None
-    
-    session_string = settings.get("session_string")
-    if not session_string:
-        print(f"DEBUG: session_string для user_id={user_id} отсутствует в БД")
-        return None
-    
-    print(f"DEBUG: session_string для user_id={user_id} найдена (длина: {len(session_string)})")
-    
-    api_id = settings.get("api_id")
-    api_hash = settings.get("api_hash")
-    
-    if not api_id or not api_hash:
-        print(f"DEBUG: API данные для user_id={user_id} отсутствуют")
-        return None
-    
-    print(f"DEBUG: API данные для user_id={user_id} найдены: api_id={api_id}")
     
     try:
-        client = TelegramClient(StringSession(session_string), api_id, api_hash)
-        await client.start()
+        client = TelegramClient(
+            StringSession(settings["session_string"]), 
+            settings["api_id"], 
+            settings["api_hash"]
+        )
+        # Запрещаем Telethon запрашивать ввод из консоли
+        await client.start(
+            phone=lambda: None,
+            code_callback=lambda: None,
+            password=lambda: None,
+            bot_token=lambda: None
+        )
         
-        me = await client.get_me()
-        print(f"DEBUG: Клиент для user_id={user_id} успешно запущен. Пользователь: {me.first_name}")
+        # Проверяем, что клиент работает
+        await client.get_me()
         telethon_clients[user_id] = client
         return client
-        
     except Exception as e:
-        print(f"Ошибка при запуске клиента для user_id={user_id}: {type(e).__name__}: {e}")
+        print(f"Ошибка запуска клиента: {e}")
+        # Если сессия повреждена — удаляем её
+        cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
+        conn.commit()
         return None
 
 async def clean_channel_from_list(user_id: int, user_ids: list, progress_callback=None) -> dict:
@@ -357,33 +355,35 @@ async def check_session(message: types.Message):
 
 @dp.message(Command("test_session"))
 async def test_session(message: types.Message):
-    """Прямой тест загруженной сессии"""
     settings = get_settings(message.from_user.id)
     if not settings:
-        await message.answer("Настройки не найдены. Сначала выполните /login")
+        await message.answer("Настройки не найдены")
         return
     
     session_string = settings.get("session_string")
-    api_id = settings.get("api_id")
-    api_hash = settings.get("api_hash")
-    
     if not session_string:
-        await message.answer("Сессия отсутствует в БД. Выполните /login")
+        await message.answer("Сессия отсутствует. Выполните /login")
         return
     
-    await message.answer(f"Тестирую сессию (длина: {len(session_string)})\nAPI ID: {api_id}")
+    await message.answer("Тестирую сессию...")
     
     try:
-        client = TelegramClient(StringSession(session_string), api_id, api_hash)
-        await client.start()
-        
+        client = TelegramClient(
+            StringSession(session_string),
+            settings["api_id"],
+            settings["api_hash"]
+        )
+        await client.start(
+            phone=lambda: None,
+            code_callback=lambda: None,
+            password=lambda: None,
+            bot_token=lambda: None
+        )
         me = await client.get_me()
-        await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name} (ID: {me.id})")
-        
+        await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name}")
         await client.disconnect()
-        
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}\n\nВыполните /reset_session, затем /login заново")
+        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}")
 
 @dp.message(Command("reset_session"))
 async def reset_session(message: types.Message):
