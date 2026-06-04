@@ -1,5 +1,6 @@
 aiogram==3.4.1
 flask==3.0.0
-telethon==2.0.0
+pyrogram==2.0.106
+tgcrypto==1.2.5
 aiohttp==3.9.5
 requests==2.31.0
