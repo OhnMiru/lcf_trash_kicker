@@ -74,7 +74,8 @@ _init_conn.close()
 pyrogram_clients: dict[int, Client] = {}
 tasks: dict[int, dict] = {}
 pending_cleanups: dict[str, dict] = {}
-auth_sessions: dict[str, dict] = {}   # token -> {user_id, client, phone, api_id, api_hash, expire}
+auth_sessions: dict[str, dict] = {}   # token -> {user_id, phone, phone_code_hash, api_id, api_hash, expire, signed_in}
+bot_loop: asyncio.AbstractEventLoop | None = None   # основной event loop бота
 
 # ========== FSM ==========
 class AuthState(StatesGroup):
@@ -441,14 +442,17 @@ async def process_phone(message: types.Message, state: FSMContext):
 
         # Генерируем одноразовый токен для веб-страницы
         token = secrets.token_urlsafe(32)
+        # Отключаем временный клиент — новый создадим при вводе кода
+        await client.disconnect()
+
         auth_sessions[token] = {
             "user_id": message.from_user.id,
-            "client": client,
             "phone": phone,
             "phone_code_hash": sent_code.phone_code_hash,
             "api_id": api_id,
             "api_hash": api_hash,
             "expire": time.time() + 600,  # 10 минут
+            "signed_in": False,
         }
 
         auth_url = f"{RENDER_URL}/auth?token={token}"
@@ -1159,7 +1163,13 @@ def auth_page():
 
 @app.route('/auth/verify', methods=['POST'])
 def auth_verify():
-    data = request.get_json()
+    """
+    Flask синхронный, но Pyrogram требует своего event loop.
+    Решение: всю async-логику гоним через bot_loop (основной loop бота)
+    с помощью run_coroutine_threadsafe + future.result().
+    Клиент пересоздаётся здесь — не передаём его между loops.
+    """
+    data     = request.get_json()
     token    = data.get('token', '')
     code     = data.get('code', '').strip()
     password = data.get('password', '').strip()
@@ -1169,72 +1179,88 @@ def auth_verify():
 
     session = auth_sessions[token]
     if time.time() > session['expire']:
-        del auth_sessions[token]
+        auth_sessions.pop(token, None)
         return jsonify(ok=False, message="Ссылка устарела. Начните /login заново")
 
-    client = session['client']
-    phone  = session['phone']
-    pch    = session['phone_code_hash']
-    user_id = session['user_id']
-    api_id  = session['api_id']
+    phone    = session['phone']
+    pch      = session['phone_code_hash']
+    user_id  = session['user_id']
+    api_id   = session['api_id']
     api_hash = session['api_hash']
 
-    # Запускаем async в отдельном event loop (Flask синхронный)
-    import asyncio as _asyncio
+    if bot_loop is None:
+        return jsonify(ok=False, message="Сервер ещё не готов, попробуйте через 5 секунд")
 
-    async def do_signin():
+    async def do_auth():
+        """Вся логика в одной async-функции, выполняется в bot_loop."""
+        # Создаём свежий клиент прямо здесь — он будет в правильном loop
+        client = Client(
+            name=f"web_auth_{user_id}",
+            api_id=api_id,
+            api_hash=api_hash,
+            in_memory=True,
+        )
+        await client.connect()
         try:
-            await client.sign_in(phone, pch, code)
+            if not password:
+                # Первый вызов: вводим код
+                try:
+                    await client.sign_in(phone, pch, code)
+                except Exception as e:
+                    err = str(e).lower()
+                    if "session_password_needed" in err:
+                        # 2FA нужна — сохраняем флаг и возвращаем специальный ответ
+                        session['signed_in'] = True  # sign_in прошёл, ждём пароль
+                        return {"need_password": True}
+                    raise
+            else:
+                # Второй вызов: после sign_in вводим 2FA пароль
+                # Нужно заново пройти sign_in (новый клиент), потом check_password
+                try:
+                    await client.sign_in(phone, pch, code)
+                except Exception as e:
+                    if "session_password_needed" not in str(e).lower():
+                        raise
+                await client.check_password(password)
+
+            # Успешная авторизация
+            session_string = str(await client.export_session_string())
+            save_settings(user_id, api_id=api_id, api_hash=api_hash, session_string=session_string)
+            auth_sessions.pop(token, None)
+
+            await bot.send_message(
+                user_id,
+                "Авторизация успешна! ✅\n\nТеперь выполните /setup для настройки канала и группы."
+            )
             return {"ok": True}
-        except Exception as e:
-            err = str(e).lower()
-            if "session_password_needed" in err or "password" in err:
-                return {"need_password": True}
-            raise
 
-    async def do_2fa(pwd):
-        await client.check_password(pwd)
-
-    async def get_session():
-        s = await client.export_session_string()
-        await client.disconnect()
-        return str(s)
-
-    loop = _asyncio.new_event_loop()
-    try:
-        if not password:
-            result = loop.run_until_complete(do_signin())
-            if result.get("need_password"):
-                return jsonify(ok=False, need_password=True, message="Требуется пароль 2FA")
-        else:
-            # Уже прошли sign_in, вводим 2FA
+        finally:
             try:
-                loop.run_until_complete(do_2fa(password))
-            except Exception as e:
-                return jsonify(ok=False, message=f"Неверный пароль: {e}")
+                await client.disconnect()
+            except Exception:
+                pass
 
-        session_string = loop.run_until_complete(get_session())
-        save_settings(user_id, api_id=api_id, api_hash=api_hash, session_string=session_string)
-        del auth_sessions[token]
-
-        # Уведомляем пользователя в Telegram (из другого loop)
-        async def notify():
-            await bot.send_message(user_id,
-                "Авторизация успешна! ✅\n\nТеперь выполните /setup для настройки канала и группы.")
-        _asyncio.run_coroutine_threadsafe(notify(), asyncio.get_event_loop())
-
-        return jsonify(ok=True, message="Авторизация успешна! Вернитесь в Telegram.")
-
+    # Запускаем корутину в bot_loop и ждём результата (таймаут 30 сек)
+    future = asyncio.run_coroutine_threadsafe(do_auth(), bot_loop)
+    try:
+        result = future.result(timeout=30)
+    except TimeoutError:
+        return jsonify(ok=False, message="Таймаут. Попробуйте ещё раз.")
     except Exception as e:
         err = str(e).lower()
         if "phone_code_invalid" in err:
             return jsonify(ok=False, message="Неверный код. Попробуйте ещё раз.")
         if "phone_code_expired" in err:
-            del auth_sessions[token]
+            auth_sessions.pop(token, None)
             return jsonify(ok=False, message="Код истёк. Начните /login заново.")
+        if "password" in err and "invalid" in err:
+            return jsonify(ok=False, message="Неверный пароль 2FA.")
         return jsonify(ok=False, message=f"Ошибка: {e}")
-    finally:
-        loop.close()
+
+    if result.get("need_password"):
+        return jsonify(ok=False, need_password=True, message="Требуется пароль 2FA")
+
+    return jsonify(ok=True, message="Авторизация успешна! Вернитесь в Telegram.")
 
 
 def run_flask():
@@ -1255,6 +1281,8 @@ async def self_ping():
 
 
 async def main():
+    global bot_loop
+    bot_loop = asyncio.get_running_loop()
     print("Бот запускается...")
     restore_tasks_from_db()
     asyncio.create_task(self_ping())
