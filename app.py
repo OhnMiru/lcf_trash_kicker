@@ -13,8 +13,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+from pyrogram import Client
+from pyrogram.errors import SessionRevoked, AuthKeyInvalid
 import aiohttp
 import requests
 
@@ -22,7 +22,7 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_URL = "https://lcf-trash-kicker.onrender.com"
 
-# Принудительно удаляем вебхук при запуске
+# Удаляем вебхук при запуске
 try:
     requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
     print("Вебхук удалён при запуске")
@@ -61,21 +61,20 @@ cursor.execute("""
 """)
 conn.commit()
 
-# Глобальные переменные
-telethon_clients = {}
+pyrogram_clients = {}
 tasks = {}
 pending_cleanups = {}
 
-# Состояния для авторизации и настройки
 class AuthState(StatesGroup):
     waiting_for_api_id = State()
     waiting_for_api_hash = State()
+    waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
     waiting_for_channel_link = State()
     waiting_for_group_link = State()
 
-# ========== ФУНКЦИЯ ПАРСИНГА ССЫЛОК ==========
+# ========== ФУНКЦИИ ==========
 def parse_post_url(url: str):
     import re
     clean_url = re.sub(r'https?://(telegram\.me|t\.me)/', '', url)
@@ -104,7 +103,6 @@ def extract_username_from_link(link: str):
         return match.group(1)
     return None
 
-# ========== ФУНКЦИИ РАБОТЫ С БАЗОЙ ==========
 def get_settings(user_id: int):
     cursor.execute("SELECT channel_id, group_id, session_string, api_id, api_hash FROM settings WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -146,8 +144,8 @@ def save_api_data(user_id: int, api_id: int, api_hash: str):
     conn.commit()
 
 def save_session(user_id: int, session_string: str):
-    if not session_string:
-        print(f"ERROR: Попытка сохранить пустую сессию для user_id={user_id}")
+    if not session_string or len(session_string) < 10:
+        print(f"Пустая сессия для user_id={user_id}")
         return False
     
     settings = get_settings(user_id)
@@ -159,7 +157,7 @@ def save_session(user_id: int, session_string: str):
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
                    (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
-    print(f"DEBUG: Сессия сохранена для user_id={user_id}, длина={len(session_string)}")
+    print(f"Сессия сохранена для user_id={user_id}")
     return True
 
 def restore_tasks_from_db():
@@ -188,39 +186,48 @@ def restore_tasks_from_db():
     conn.commit()
     print(f"Восстановлено задач: {restored_count}")
 
-async def get_telethon_client(user_id: int):
-    print(f"get_telethon_client для user_id={user_id}")
+async def get_pyrogram_client(user_id: int):
+    print(f"get_pyrogram_client для user_id={user_id}")
     
-    if user_id in telethon_clients and telethon_clients[user_id].is_connected():
-        return telethon_clients[user_id]
+    if user_id in pyrogram_clients and pyrogram_clients[user_id].is_connected:
+        return pyrogram_clients[user_id]
     
     settings = get_settings(user_id)
-    if not settings or not settings.get("session_string"):
+    if not settings:
+        return None
+    
+    session_string = settings.get("session_string")
+    if not session_string:
+        return None
+    
+    api_id = settings.get("api_id")
+    api_hash = settings.get("api_hash")
+    
+    if not api_id or not api_hash:
         return None
     
     try:
-        client = TelegramClient(
-            StringSession(settings["session_string"]), 
-            settings["api_id"], 
-            settings["api_hash"]
+        client = Client(
+            f"user_{user_id}",
+            api_id=api_id,
+            api_hash=api_hash,
+            session_string=session_string,
+            in_memory=True
         )
-        # Запрещаем Telethon запрашивать ввод из консоли
-        await client.start(
-            phone=lambda: None,
-            code_callback=lambda: None,
-            password=lambda: None,
-            bot_token=lambda: None
-        )
+        await client.start()
         
-        # Проверяем, что клиент работает
-        await client.get_me()
-        telethon_clients[user_id] = client
+        me = await client.get_me()
+        print(f"Клиент запущен: {me.first_name}")
+        pyrogram_clients[user_id] = client
         return client
-    except Exception as e:
-        print(f"Ошибка запуска клиента: {e}")
-        # Если сессия повреждена — удаляем её
+        
+    except (SessionRevoked, AuthKeyInvalid) as e:
+        print(f"Сессия недействительна: {e}")
         cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (user_id,))
         conn.commit()
+        return None
+    except Exception as e:
+        print(f"Ошибка: {e}")
         return None
 
 async def clean_channel_from_list(user_id: int, user_ids: list, progress_callback=None) -> dict:
@@ -231,21 +238,21 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     if not settings:
         return {"success": 0, "errors": 0, "total": 0, "error": "Настройки не найдены"}
     
-    client = await get_telethon_client(user_id)
+    client = await get_pyrogram_client(user_id)
     if not client:
-        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена. Выполните /login заново"}
+        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена"}
     
     success = 0
     errors = 0
     
     try:
-        channel_entity = await client.get_entity(settings["channel_id"])
+        chat = await client.get_chat(settings["channel_id"])
     except Exception as e:
         return {"success": 0, "errors": 0, "total": 0, "error": f"Не удалось найти канал: {e}"}
     
     for idx, uid in enumerate(user_ids):
         try:
-            await client.kick_participant(channel_entity, uid)
+            await client.ban_chat_member(chat.id, uid)
             success += 1
             await asyncio.sleep(0.3)
         except Exception:
@@ -267,16 +274,14 @@ async def start(message: types.Message):
         "/status - активные задачи\n"
         "/cancel ID_поста - отменить задачу\n"
         "/mysettings - текущие настройки\n"
-        "/check_session - диагностика сессии\n"
-        "/test_session - тест работоспособности сессии\n"
-        "/reset_session - сброс сессии (если не работает)"
+        "/test_session - тест сессии"
     )
 
 @dp.message(Command("login"))
 async def cmd_login(message: types.Message, state: FSMContext):
     await message.answer(
         "АВТОРИЗАЦИЯ\n\n"
-        "Шаг 1 из 2: Введите ваш API ID\n"
+        "Шаг 1 из 4: Введите ваш API ID\n"
         "(число с сайта my.telegram.org -> API Development Tools)\n\n"
         "Пример: 1234567\n\n"
         "Для отмены: /cancel"
@@ -294,7 +299,7 @@ async def process_api_id(message: types.Message, state: FSMContext):
         api_id = int(message.text.strip())
         await state.update_data(api_id=api_id)
         await message.answer(
-            "Шаг 2 из 2: Введите ваш API HASH\n"
+            "Шаг 2 из 4: Введите ваш API HASH\n"
             "(строка с сайта my.telegram.org)\n\n"
             "Пример: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6\n\n"
             "Для отмены: /cancel"
@@ -316,152 +321,49 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     
     save_api_data(message.from_user.id, api_id, api_hash)
     
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Поделиться номером телефона", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    
     await message.answer(
-        "API данные сохранены\n\n"
-        "Нажмите на кнопку ниже, чтобы поделиться номером телефона.\n"
-        "Telegram сам отправит ваш номер боту.\n\n"
-        "Это нужно для авторизации.",
-        reply_markup=keyboard
+        "Шаг 3 из 4: Введите ваш номер телефона\n"
+        "в международном формате с +\n\n"
+        "Пример: +79001234567\n\n"
+        "Для отмены: /cancel"
     )
-    await state.clear()
-    await state.update_data(waiting_for_contact=True, api_id=api_id, api_hash=api_hash)
+    await state.set_state(AuthState.waiting_for_phone)
 
-@dp.message(Command("check_session"))
-async def check_session(message: types.Message):
-    """Диагностическая команда для проверки сессии"""
-    settings = get_settings(message.from_user.id)
-    if not settings:
-        await message.answer("Настройки не найдены. Сначала выполните /login")
-        return
-    
-    has_session = settings.get("session_string") is not None and len(settings.get("session_string", "")) > 0
-    session_len = len(settings.get("session_string") or "")
-    
-    await message.answer(
-        f"Диагностика сессии:\n\n"
-        f"Сессия в БД: {'есть' if has_session else 'нет'}\n"
-        f"Длина сессии: {session_len} символов\n"
-        f"API ID: {settings.get('api_id') or 'нет'}\n"
-        f"Канал: {settings.get('channel_id') or 'не настроен'}\n"
-        f"Группа: {settings.get('group_id') or 'не настроена'}\n\n"
-        f"Если сессии нет, выполните /login заново"
-    )
-
-@dp.message(Command("test_session"))
-async def test_session(message: types.Message):
-    settings = get_settings(message.from_user.id)
-    if not settings:
-        await message.answer("Настройки не найдены")
-        return
-    
-    session_string = settings.get("session_string")
-    if not session_string:
-        await message.answer("Сессия отсутствует. Выполните /login")
-        return
-    
-    await message.answer("Тестирую сессию...")
-    
-    try:
-        client = TelegramClient(
-            StringSession(session_string),
-            settings["api_id"],
-            settings["api_hash"]
-        )
-        await client.start(
-            phone=lambda: None,
-            code_callback=lambda: None,
-            password=lambda: None,
-            bot_token=lambda: None
-        )
-        me = await client.get_me()
-        await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name}")
-        await client.disconnect()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}")
-
-@dp.message(Command("reset_session"))
-async def reset_session(message: types.Message):
-    """Сбрасывает сессию"""
-    cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (message.from_user.id,))
-    conn.commit()
-    await message.answer("Сессия сброшена. Теперь выполните /login заново")
-
-@dp.message(lambda message: message.contact is not None)
-async def handle_contact(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if not data.get("waiting_for_contact"):
-        pass
-    
-    phone_number = message.contact.phone_number
-    
-    await message.answer(
-        f"Создаю сессию для номера {phone_number}...",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-    
-    settings = get_settings(message.from_user.id)
-    if not settings or not settings.get("api_id"):
-        await message.answer("Ошибка: API данные не найдены. Начните заново с /login")
+@dp.message(AuthState.waiting_for_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
         await state.clear()
+        await message.answer("Отменено")
         return
     
-    client = TelegramClient(StringSession(), settings["api_id"], settings["api_hash"])
-    await client.connect()
+    phone = message.text.strip()
+    if not phone.startswith('+'):
+        await message.answer("Номер должен начинаться с +")
+        return
+    
+    data = await state.get_data()
+    api_id = data.get("api_id")
+    api_hash = data.get("api_hash")
+    
+    await state.update_data(phone=phone)
     
     try:
-        await client.sign_in(phone_number)
-        session_string = StringSession.save(client.session)
+        client = Client("temp", api_id=api_id, api_hash=api_hash, in_memory=True)
+        await client.connect()
         
-        if not session_string or len(session_string) < 10:
-            await message.answer("Ошибка: получена пустая сессия. Попробуйте ещё раз.")
-            await client.disconnect()
-            return
-        
-        save_session(message.from_user.id, session_string)
-        
-        check_settings = get_settings(message.from_user.id)
-        if not check_settings or not check_settings.get("session_string"):
-            await message.answer("Ошибка: не удалось сохранить сессию в базу данных. Попробуйте ещё раз.")
-            await client.disconnect()
-            return
-        
-        await client.disconnect()
+        sent_code = await client.send_code(phone)
+        await state.update_data(client=client, phone_code_hash=sent_code.phone_code_hash)
         
         await message.answer(
-            f"Авторизация успешна!\n\n"
-            f"Сессия сохранена (длина: {len(session_string)} символов)\n\n"
-            f"Теперь выполните /setup для настройки канала и группы.\n\n"
-            f"/setup - настроить канал и группу по ссылке\n"
-            f"/setup ID_канала ID_группы - ввести ID вручную"
+            "✅ Код отправлен!\n\n"
+            "Шаг 4 из 4: Введите код подтверждения из Telegram\n"
+            "Пример: 12345\n\n"
+            "Для отмены: /cancel"
         )
-        await state.clear()
-        
+        await state.set_state(AuthState.waiting_for_code)
     except Exception as e:
-        error_text = str(e).lower()
-        if "phone code" in error_text or "code" in error_text:
-            await state.update_data(client=client, phone=phone_number)
-            await message.answer(
-                "Введите код подтверждения, который пришёл вам в Telegram.\n"
-                "Пример: 12345\n\n"
-                "Для отмены: /cancel"
-            )
-            await state.set_state(AuthState.waiting_for_code)
-        elif "password" in error_text or "2fa" in error_text:
-            await state.update_data(client=client, phone=phone_number)
-            await message.answer(
-                "Введите пароль двухфакторной аутентификации.\n\n"
-                "Для отмены: /cancel"
-            )
-            await state.set_state(AuthState.waiting_for_password)
-        else:
-            await message.answer(f"Ошибка: {e}")
-            await state.clear()
+        await message.answer(f"Ошибка: {e}")
+        await state.clear()
 
 @dp.message(AuthState.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
@@ -474,6 +376,9 @@ async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
     client = data.get('client')
     phone = data.get('phone')
+    phone_code_hash = data.get('phone_code_hash')
+    api_id = data.get('api_id')
+    api_hash = data.get('api_hash')
     
     if not client:
         await message.answer("Сессия потеряна. Начните заново с /login")
@@ -481,23 +386,16 @@ async def process_code(message: types.Message, state: FSMContext):
         return
     
     try:
-        await client.sign_in(phone, code)
-        session_string = StringSession.save(client.session)
-        
-        if not session_string or len(session_string) < 10:
-            await message.answer("Ошибка: получена пустая сессия. Попробуйте ещё раз.")
-            await client.disconnect()
-            return
-        
+        await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+        session_string = await client.export_session_string()
         save_session(message.from_user.id, session_string)
+        save_api_data(message.from_user.id, api_id, api_hash)
+        
         await client.disconnect()
         
         await message.answer(
-            f"Авторизация успешна!\n\n"
-            f"Сессия сохранена (длина: {len(session_string)} символов)\n\n"
-            f"Теперь выполните /setup для настройки канала и группы.\n\n"
-            f"/setup - настроить канал и группу по ссылке\n"
-            f"/setup ID_канала ID_группы - ввести ID вручную"
+            "✅ Авторизация успешна!\n\n"
+            "Теперь выполните /setup для настройки канала и группы."
         )
         await state.clear()
         
@@ -509,7 +407,7 @@ async def process_code(message: types.Message, state: FSMContext):
                 "Для отмены: /cancel"
             )
             await state.set_state(AuthState.waiting_for_password)
-            await state.update_data(client=client, phone=phone)
+            await state.update_data(client=client)
         else:
             await message.answer(f"Ошибка: {e}")
             await state.clear()
@@ -524,62 +422,63 @@ async def process_password(message: types.Message, state: FSMContext):
     password = message.text.strip()
     data = await state.get_data()
     client = data.get('client')
+    api_id = data.get('api_id')
+    api_hash = data.get('api_hash')
     
     try:
-        await client.sign_in(password=password)
-        session_string = StringSession.save(client.session)
-        
-        if not session_string or len(session_string) < 10:
-            await message.answer("Ошибка: получена пустая сессия. Попробуйте ещё раз.")
-            await client.disconnect()
-            return
-        
+        await client.check_password(password)
+        session_string = await client.export_session_string()
         save_session(message.from_user.id, session_string)
+        save_api_data(message.from_user.id, api_id, api_hash)
+        
         await client.disconnect()
         
         await message.answer(
-            f"Авторизация успешна!\n\n"
-            f"Сессия сохранена (длина: {len(session_string)} символов)\n\n"
-            f"Теперь выполните /setup для настройки канала и группы.\n\n"
-            f"/setup - настроить канал и группу по ссылке\n"
-            f"/setup ID_канала ID_группы - ввести ID вручную"
+            "✅ Авторизация успешна!\n\n"
+            "Теперь выполните /setup для настройки канала и группы."
         )
         await state.clear()
         
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
+@dp.message(Command("test_session"))
+async def test_session(message: types.Message):
+    settings = get_settings(message.from_user.id)
+    if not settings:
+        await message.answer("Настройки не найдены")
+        return
+    
+    session_string = settings.get("session_string")
+    api_id = settings.get("api_id")
+    api_hash = settings.get("api_hash")
+    
+    if not session_string:
+        await message.answer("Сессия отсутствует. Выполните /login")
+        return
+    
+    await message.answer("Тестирую сессию...")
+    
+    try:
+        client = Client("test", api_id=api_id, api_hash=api_hash, session_string=session_string, in_memory=True)
+        await client.start()
+        me = await client.get_me()
+        await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name}")
+        await client.disconnect()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}")
+
+@dp.message(Command("reset_session"))
+async def reset_session(message: types.Message):
+    cursor.execute("UPDATE settings SET session_string = NULL WHERE user_id = ?", (message.from_user.id,))
+    conn.commit()
+    await message.answer("Сессия сброшена. Выполните /login заново")
+
 @dp.message(Command("setup"))
 async def setup_command(message: types.Message, state: FSMContext):
     settings = get_settings(message.from_user.id)
     if not settings or not settings.get("session_string"):
         await message.answer("Сначала выполните /login")
-        return
-    
-    args = message.text.split()
-    
-    if len(args) == 3:
-        try:
-            channel_id = int(args[1])
-            group_id = int(args[2])
-        except ValueError:
-            await message.answer("ID канала и группы должны быть числами")
-            return
-        
-        save_settings(
-            message.from_user.id,
-            channel_id=channel_id,
-            group_id=group_id,
-            session_string=settings.get("session_string"),
-            api_id=settings.get("api_id"),
-            api_hash=settings.get("api_hash")
-        )
-        await message.answer(
-            f"Настройки сохранены\n\n"
-            f"Канал: {channel_id}\n"
-            f"Группа: {group_id}\n\n"
-            f"Теперь используйте /check"
-        )
         return
     
     await message.answer(
@@ -611,31 +510,19 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         try:
             bot_member = await bot.get_chat_member(chat.id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
-                await message.answer(
-                    f"Бот не является администратором канала {chat.title}.\n"
-                    f"Добавьте бота в администраторы и попробуйте снова."
-                )
+                await message.answer(f"Бот не является администратором канала {chat.title}")
                 return
-        except Exception:
-            await message.answer(
-                f"Не удалось проверить права бота.\n"
-                f"Убедитесь, что бот добавлен в администраторы канала {chat.title}."
-            )
+        except:
+            await message.answer(f"Не удалось проверить права бота")
             return
         
         try:
             user_member = await bot.get_chat_member(chat.id, message.from_user.id)
             if user_member.status not in ['administrator', 'creator']:
-                await message.answer(
-                    f"Вы не являетесь администратором канала {chat.title}.\n"
-                    f"Пожалуйста, выберите канал, где вы администратор."
-                )
+                await message.answer(f"Вы не являетесь администратором канала {chat.title}")
                 return
-        except Exception:
-            await message.answer(
-                f"Не удалось проверить ваши права.\n"
-                f"Убедитесь, что вы являетесь администратором канала {chat.title}."
-            )
+        except:
+            await message.answer(f"Не удалось проверить ваши права")
             return
         
         settings = get_settings(message.from_user.id)
@@ -652,13 +539,12 @@ async def process_channel_link(message: types.Message, state: FSMContext):
             f"Канал выбран: {chat.title}\n"
             f"ID: {chat.id}\n\n"
             f"Теперь отправьте ссылку на группу обсуждения.\n"
-            f"Бот и вы должны быть администраторами группы.\n\n"
             f"Для отмены: /cancel"
         )
         await state.set_state(AuthState.waiting_for_group_link)
         
     except Exception as e:
-        await message.answer(f"Ошибка: {e}\nУбедитесь, что ссылка верна.")
+        await message.answer(f"Ошибка: {e}")
 
 @dp.message(AuthState.waiting_for_group_link)
 async def process_group_link(message: types.Message, state: FSMContext):
@@ -678,37 +564,25 @@ async def process_group_link(message: types.Message, state: FSMContext):
         chat = await bot.get_chat(f"@{username}")
         
         if chat.type not in ['group', 'supergroup']:
-            await message.answer("Это не группа. Пожалуйста, отправьте ссылку на группу обсуждения.")
+            await message.answer("Это не группа")
             return
         
         try:
             bot_member = await bot.get_chat_member(chat.id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
-                await message.answer(
-                    f"Бот не является администратором группы {chat.title}.\n"
-                    f"Добавьте бота в администраторы и попробуйте снова."
-                )
+                await message.answer(f"Бот не является администратором группы {chat.title}")
                 return
-        except Exception:
-            await message.answer(
-                f"Не удалось проверить права бота.\n"
-                f"Убедитесь, что бот добавлен в администраторы группы {chat.title}."
-            )
+        except:
+            await message.answer(f"Не удалось проверить права бота")
             return
         
         try:
             user_member = await bot.get_chat_member(chat.id, message.from_user.id)
             if user_member.status not in ['administrator', 'creator']:
-                await message.answer(
-                    f"Вы не являетесь администратором группы {chat.title}.\n"
-                    f"Пожалуйста, выберите группу, где вы администратор."
-                )
+                await message.answer(f"Вы не являетесь администратором группы {chat.title}")
                 return
-        except Exception:
-            await message.answer(
-                f"Не удалось проверить ваши права.\n"
-                f"Убедитесь, что вы являетесь администратором группы {chat.title}."
-            )
+        except:
+            await message.answer(f"Не удалось проверить ваши права")
             return
         
         settings = get_settings(message.from_user.id)
@@ -731,14 +605,13 @@ async def process_group_link(message: types.Message, state: FSMContext):
         else:
             await message.answer(
                 f"Группа выбрана: {chat.title}\n"
-                f"ID: {chat.id}\n\n"
                 f"Сначала выберите канал. Повторите /setup"
             )
         
         await state.clear()
         
     except Exception as e:
-        await message.answer(f"Ошибка: {e}\nУбедитесь, что ссылка верна.")
+        await message.answer(f"Ошибка: {e}")
 
 @dp.message(Command("mysettings"))
 async def mysettings(message: types.Message):
@@ -748,7 +621,7 @@ async def mysettings(message: types.Message):
     if settings:
         text += f"Канал: {settings['channel_id'] if settings['channel_id'] else 'не настроен'}\n"
         text += f"Группа: {settings['group_id'] if settings['group_id'] else 'не настроена'}\n"
-        text += f"API ID: {settings['api_id'] if settings['api_id'] else 'не указан'}\n"
+        text += f"API ID: {settings['api_id'] or 'не указан'}\n"
         text += f"Авторизация: {'выполнена' if settings['session_string'] else 'не выполнена'}\n"
     else:
         text += "Настройки не найдены. Выполните /login и /setup"
@@ -773,8 +646,7 @@ async def check_command(message: types.Message):
             "Примеры:\n"
             "/check https://t.me/c/1234567890/456 24\n"
             "/check https://t.me/mychannel/2 0.25\n"
-            "/check t.me/mychannel/2 1.5\n\n"
-            "Часы могут быть целыми или дробными (0.25 = 15 минут)"
+            "Часы могут быть дробными (0.25 = 15 минут)"
         )
         return
     
@@ -782,20 +654,14 @@ async def check_command(message: types.Message):
     try:
         hours = float(args[2])
     except ValueError:
-        await message.answer("Часы должны быть числом (целым или дробным, например 0.25)")
+        await message.answer("Часы должны быть числом")
         return
     
     saved_channel_id = settings["channel_id"]
     channel_id_or_username, post_id = parse_post_url(post_url)
     
     if channel_id_or_username is None or post_id is None:
-        await message.answer(
-            "Неверный формат ссылки.\n\n"
-            "Поддерживаются:\n"
-            "- https://t.me/c/1234567890/456\n"
-            "- https://t.me/username/2\n"
-            "- t.me/username/2"
-        )
+        await message.answer("Неверный формат ссылки")
         return
     
     actual_channel_id = channel_id_or_username
@@ -803,29 +669,12 @@ async def check_command(message: types.Message):
         try:
             chat = await bot.get_chat(f"@{actual_channel_id}")
             actual_channel_id = chat.id
-        except Exception as e:
-            await message.answer(f"Не удалось получить информацию о канале {actual_channel_id}. Убедитесь, что ссылка верна.")
+        except:
+            await message.answer(f"Не удалось получить информацию о канале")
             return
     
     if actual_channel_id != saved_channel_id:
-        channel_name = str(saved_channel_id)
-        try:
-            chat = await bot.get_chat(saved_channel_id)
-            channel_name = chat.title
-        except:
-            pass
-        
-        await message.answer(
-            f"Канал в ссылке не совпадает с настроенным каналом.\n\n"
-            f"Настроенный канал: {channel_name} (ID: {saved_channel_id})\n"
-            f"Канал из ссылки: ID: {actual_channel_id}\n\n"
-            f"Если вы используете другой канал, выполните /setup для его настройки.\n"
-            f"Если это тот же канал, проблема в несовпадении ID.\n\n"
-            f"Попробуйте:\n"
-            f"1. Узнать правильный ID канала через @userinfobot\n"
-            f"2. Выполнить /setup {actual_channel_id} ID_группы\n"
-            f"3. Или используйте /setup (без аргументов) для настройки по ссылке"
-        )
+        await message.answer(f"Это не ваш канал. Ваш канал ID: {saved_channel_id}")
         return
     
     deadline = asyncio.get_event_loop().time() + hours * 3600
@@ -838,13 +687,9 @@ async def check_command(message: types.Message):
         "user_id": message.from_user.id
     }
     
-    cursor.execute("""
-        INSERT OR REPLACE INTO active_tasks (post_id, deadline, post_link, hours, user_id)
-        VALUES (?, ?, ?, ?, ?)
-    """, (post_id, deadline, post_url, hours, message.from_user.id))
+    cursor.execute("INSERT OR REPLACE INTO active_tasks (post_id, deadline, post_link, hours, user_id) VALUES (?, ?, ?, ?, ?)",
+                   (post_id, deadline, post_url, hours, message.from_user.id))
     conn.commit()
-    
-    print(f"DEBUG: Задача создана для поста {post_id}, deadline = {deadline}")
     
     if hours < 1:
         minutes = int(hours * 60)
@@ -902,7 +747,7 @@ async def cancel(message: types.Message):
     else:
         await message.answer(f"Задача для поста {post_id} не найдена")
 
-# ========== КОЛБЭКИ ДЛЯ РЕДАКТИРОВАНИЯ ==========
+# ========== КОЛБЭКИ ==========
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
     temp_id = callback.data.split("_")[1]
@@ -1007,7 +852,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
     data = pending_cleanups[temp_id]
     
     if data["total_count"] == 0:
-        await callback.message.edit_text("Список пуст — некого удалять")
+        await callback.message.edit_text("Список пуст")
         del pending_cleanups[temp_id]
         return
     
@@ -1022,7 +867,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
         f"ГОТОВО\n\n"
         f"Пост: {data['post_link']}\n"
         f"Не отметилось: {data['total_count']}\n"
-        f"Удалено из канала: {result['success']}\n"
+        f"Удалено: {result['success']}\n"
         f"Ошибок: {result['errors']}"
     )
     
@@ -1038,10 +883,9 @@ async def handle_confirm_no(callback: types.CallbackQuery):
         await callback.message.edit_text("Удаление отменено")
         del pending_cleanups[temp_id]
 
-# ========== ОСНОВНАЯ ЛОГИКА ПРОВЕРКИ ==========
+# ========== ОСНОВНАЯ ЛОГИКА ==========
 async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_link: str, user_id: int):
-    print(f"DEBUG: process_post запущена для поста {post_id}")
-    print(f"DEBUG: deadline = {deadline}, текущее время = {asyncio.get_event_loop().time()}")
+    print(f"process_post запущена для поста {post_id}")
     
     cursor.execute("DELETE FROM active_tasks WHERE post_id = ?", (post_id,))
     conn.commit()
@@ -1053,38 +897,24 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
     
     wait_seconds = deadline - asyncio.get_event_loop().time()
     if wait_seconds > 0:
-        print(f"DEBUG: Ожидание {wait_seconds} секунд до дедлайна")
         await asyncio.sleep(wait_seconds)
     
     if post_id in tasks:
         del tasks[post_id]
     
-    print(f"DEBUG: Начинаю сбор комментаторов для поста {post_id}")
-    
-    client = await get_telethon_client(user_id)
+    client = await get_pyrogram_client(user_id)
     if not client:
-        await bot.send_message(reply_chat_id, "Ошибка: сессия Telethon не найдена. Выполните /login заново")
+        await bot.send_message(reply_chat_id, "Ошибка: сессия не найдена. Выполните /login заново")
         return
     
     commenters = set()
     try:
-        channel_entity = await client.get_entity(settings["channel_id"])
+        chat = await client.get_chat(settings["channel_id"])
+        async for message in client.get_chat_history(chat.id, limit=500):
+            if message.reply_to_message_id == post_id:
+                commenters.add(message.from_user.id)
         
-        message = await client.get_messages(channel_entity, ids=post_id)
-        if not message:
-            await bot.send_message(reply_chat_id, f"Пост с ID {post_id} не найден в канале")
-            return
-        
-        async for reply in client.iter_messages(channel_entity, reply_to=post_id):
-            if reply.from_id:
-                if hasattr(reply.from_id, 'user_id'):
-                    user_id_telethon = reply.from_id.user_id
-                else:
-                    user_id_telethon = reply.from_id
-                commenters.add(user_id_telethon)
-        
-        print(f"DEBUG: Найдено комментаторов: {len(commenters)}")
-                
+        print(f"Найдено комментаторов: {len(commenters)}")
     except Exception as e:
         await bot.send_message(reply_chat_id, f"Ошибка сбора комментаторов: {e}")
         return
@@ -1098,15 +928,11 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
         await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
         return
     
-    print(f"DEBUG: Участников группы: {len(members)}")
-    
     to_kick = list(members - commenters)
     
     if not to_kick:
         await bot.send_message(reply_chat_id, f"Пост {post_link}\nВсе отметились")
         return
-    
-    print(f"DEBUG: Нужно кикнуть {len(to_kick)} человек")
     
     kicked_group = 0
     for uid in to_kick:
@@ -1115,7 +941,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int, post_l
             await asyncio.sleep(0.2)
             await bot.unban_chat_member(settings["group_id"], uid)
             kicked_group += 1
-        except Exception:
+        except:
             pass
     
     await bot.send_message(settings["group_id"], f"Кикнуто из группы: {kicked_group}")
@@ -1187,13 +1013,11 @@ async def self_ping():
                 async with session.get(f"{RENDER_URL}/health") as resp:
                     if resp.status == 200:
                         print("Self-ping успешен")
-                    else:
-                        print(f"Self-ping вернул статус: {resp.status}")
-        except Exception as e:
-            print(f"Self-ping ошибка: {e}")
+        except:
+            pass
 
 async def main():
-    print("Бот запущен и готов к работе")
+    print("Бот запущен")
     restore_tasks_from_db()
     asyncio.create_task(self_ping())
     await dp.start_polling(bot)
