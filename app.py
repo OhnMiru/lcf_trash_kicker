@@ -1018,9 +1018,32 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
     # Собираем участников группы
     members = set()
     try:
-        async for member in client.get_chat_members(settings["group_id"]):
+        # Pyrogram иногда не резолвит числовой ID — пробуем несколько форматов
+        group_peer = None
+        group_id_raw = settings["group_id"]  # например -1003950691480
+        
+        # Убираем -100 и пробуем как int
+        group_id_str = str(group_id_raw)
+        if group_id_str.startswith("-100"):
+            short_id = int(group_id_str[4:])  # без -100
+        else:
+            short_id = int(group_id_str.lstrip("-"))
+        
+        # Пробуем получить чат через get_chat чтобы закэшировать peer
+        try:
+            chat_obj = await client.get_chat(group_id_raw)
+            group_peer = chat_obj.id
+        except Exception:
+            try:
+                chat_obj = await client.get_chat(f"-100{short_id}")
+                group_peer = chat_obj.id
+            except Exception:
+                group_peer = group_id_raw
+
+        async for member in client.get_chat_members(group_peer):
             if member.user and not member.user.is_bot:
                 members.add(member.user.id)
+                
     except Exception as e:
         await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
         return
