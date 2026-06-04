@@ -553,9 +553,10 @@ async def cmd_setup(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "НАСТРОЙКА\n\n"
-        "Шаг 1/2: Отправьте ссылку на канал\n"
+        "Шаг 1/2: Введите ID канала\n"
         "(вы и бот должны быть администраторами)\n\n"
-        "Пример: https://t.me/mychannel\n\n"
+        "Узнать ID можно через @Getmyid_bot\n\n"
+        "Пример: -1001234567890\n\n"
         "/cancel — отмена"
     )
     await state.set_state(SetupState.waiting_for_channel_link)
@@ -568,24 +569,33 @@ async def process_channel_link(message: types.Message, state: FSMContext):
         await message.answer("Отменено")
         return
 
-    username = extract_username_from_link(message.text.strip())
-    if not username:
-        await message.answer("Неверный формат. Пример: https://t.me/mychannel")
+    raw = message.text.strip()
+    try:
+        channel_id = int(raw)
+    except ValueError:
+        await message.answer(
+            "ID должен быть числом, например: -1001234567890\n\n"
+            "Узнать ID канала: @Getmyid_bot"
+        )
         return
 
     try:
-        chat = await bot.get_chat(f"@{username}")
+        chat = await bot.get_chat(channel_id)
     except Exception as e:
-        await message.answer(f"Не удалось найти канал: {e}")
+        await message.answer(
+            f"Не удалось найти канал с ID {channel_id}\n"
+            f"Ошибка: {e}\n\n"
+            f"Убедитесь, что бот добавлен в канал как администратор"
+        )
         return
 
     try:
         bot_member = await bot.get_chat_member(chat.id, (await bot.get_me()).id)
         if bot_member.status not in ["administrator", "creator"]:
-            await message.answer(f"Бот не является администратором канала «{chat.title}»")
+            await message.answer(f"Бот не является администратором канала «{chat.title}»\nДобавьте бота как админа и попробуйте снова")
             return
     except Exception:
-        await message.answer("Не удалось проверить права бота в канале")
+        await message.answer("Не удалось проверить права бота — убедитесь, что бот добавлен в канал")
         return
 
     try:
@@ -600,9 +610,11 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, channel_id=chat.id)
     await state.set_state(SetupState.waiting_for_group_link)
     await message.answer(
-        f"Канал: {chat.title} (ID: {chat.id})\n\n"
-        f"Шаг 2/2: Отправьте ссылку на группу обсуждения\n\n"
-        f"Пример: https://t.me/mychannel_chat\n\n"
+        f"✅ Канал принят: {chat.title}\n"
+        f"ID: {chat.id}\n\n"
+        f"Шаг 2/2: Введите ID группы обсуждения\n\n"
+        f"Узнать ID можно через @Getmyid_bot\n\n"
+        f"Пример: -1009876543210\n\n"
         f"/cancel — отмена"
     )
 
@@ -614,28 +626,37 @@ async def process_group_link(message: types.Message, state: FSMContext):
         await message.answer("Отменено")
         return
 
-    username = extract_username_from_link(message.text.strip())
-    if not username:
-        await message.answer("Неверный формат. Пример: https://t.me/mychannel_chat")
+    raw = message.text.strip()
+    try:
+        group_id = int(raw)
+    except ValueError:
+        await message.answer(
+            "ID должен быть числом, например: -1009876543210\n\n"
+            "Узнать ID группы: @Getmyid_bot"
+        )
         return
 
     try:
-        chat = await bot.get_chat(f"@{username}")
+        chat = await bot.get_chat(group_id)
     except Exception as e:
-        await message.answer(f"Не удалось найти группу: {e}")
+        await message.answer(
+            f"Не удалось найти группу с ID {group_id}\n"
+            f"Ошибка: {e}\n\n"
+            f"Убедитесь, что бот добавлен в группу как администратор"
+        )
         return
 
     if chat.type not in ["group", "supergroup"]:
-        await message.answer("Это не группа")
+        await message.answer("Это не группа. Введите ID группы (не канала)")
         return
 
     try:
         bot_member = await bot.get_chat_member(chat.id, (await bot.get_me()).id)
         if bot_member.status not in ["administrator", "creator"]:
-            await message.answer(f"Бот не является администратором группы «{chat.title}»")
+            await message.answer(f"Бот не является администратором группы «{chat.title}»\nДобавьте бота как админа и попробуйте снова")
             return
     except Exception:
-        await message.answer("Не удалось проверить права бота в группе")
+        await message.answer("Не удалось проверить права бота — убедитесь, что бот добавлен в группу")
         return
 
     save_settings(message.from_user.id, group_id=chat.id)
@@ -643,9 +664,10 @@ async def process_group_link(message: types.Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"Настройки сохранены!\n\n"
-        f"Канал: {settings['channel_id']}\n"
-        f"Группа: {chat.title} (ID: {chat.id})\n\n"
+        f"✅ Настройки сохранены!\n\n"
+        f"Канал ID: {settings['channel_id']}\n"
+        f"Группа: {chat.title}\n"
+        f"Группа ID: {chat.id}\n\n"
         f"Используйте /check для запуска проверки"
     )
 
