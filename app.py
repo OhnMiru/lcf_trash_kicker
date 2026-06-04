@@ -239,17 +239,17 @@ async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[i
     except Exception as e:
         print(f"[Commenters] discussion_replies недоступен: {e}, пробуем fallback...")
         try:
-            # Метод 2: fallback — ищем через историю группы обсуждения
-            # Получаем linked group
+            # Метод 2: fallback — ищем через историю linked-группы
             chat = await client.get_chat(channel_id)
             if chat.linked_chat:
                 group_id = chat.linked_chat.id
                 async for msg in client.get_chat_history(group_id, limit=1000):
-                    # Сообщения, которые являются ответами на пересланный пост
                     if (msg.from_user and not msg.from_user.is_bot and
                             msg.reply_to_message_id is not None):
                         commenters.add(msg.from_user.id)
                 print(f"[Commenters] Найдено через fallback: {len(commenters)}")
+        except Exception as e2:
+            print(f"[Commenters] Fallback тоже не сработал: {e2}")
     return commenters
 
 
