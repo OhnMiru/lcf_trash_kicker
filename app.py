@@ -157,7 +157,7 @@ def save_session(user_id: int, session_string: str):
     cursor.execute("INSERT OR REPLACE INTO settings (user_id, channel_id, group_id, session_string, api_id, api_hash) VALUES (?, ?, ?, ?, ?, ?)",
                    (user_id, channel_id, group_id, session_string, api_id, api_hash))
     conn.commit()
-    print(f"Сессия сохранена для user_id={user_id}")
+    print(f"Сессия сохранена для user_id={user_id}, длина={len(session_string)}")
     return True
 
 def restore_tasks_from_db():
@@ -194,21 +194,29 @@ async def get_pyrogram_client(user_id: int):
     
     settings = get_settings(user_id)
     if not settings:
+        print("Настройки не найдены")
         return None
     
     session_string = settings.get("session_string")
     if not session_string:
+        print("session_string отсутствует")
+        return None
+    
+    # Убеждаемся, что session_string - это строка
+    if not isinstance(session_string, str):
+        print(f"session_string не строка, а {type(session_string)}")
         return None
     
     api_id = settings.get("api_id")
     api_hash = settings.get("api_hash")
     
     if not api_id or not api_hash:
+        print("API данные отсутствуют")
         return None
     
     try:
         client = Client(
-            f"user_{user_id}",
+            name=f"user_{user_id}",
             api_id=api_id,
             api_hash=api_hash,
             session_string=session_string,
@@ -227,7 +235,7 @@ async def get_pyrogram_client(user_id: int):
         conn.commit()
         return None
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка: {type(e).__name__}: {e}")
         return None
 
 async def clean_channel_from_list(user_id: int, user_ids: list, progress_callback=None) -> dict:
@@ -240,7 +248,7 @@ async def clean_channel_from_list(user_id: int, user_ids: list, progress_callbac
     
     client = await get_pyrogram_client(user_id)
     if not client:
-        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена"}
+        return {"success": 0, "errors": 0, "total": 0, "error": "Сессия не найдена. Выполните /login заново"}
     
     success = 0
     errors = 0
@@ -274,7 +282,8 @@ async def start(message: types.Message):
         "/status - активные задачи\n"
         "/cancel ID_поста - отменить задачу\n"
         "/mysettings - текущие настройки\n"
-        "/test_session - тест сессии"
+        "/test_session - тест сессии\n"
+        "/debug_session - диагностика сессии"
     )
 
 @dp.message(Command("login"))
@@ -355,7 +364,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         await state.update_data(client=client, phone_code_hash=sent_code.phone_code_hash)
         
         await message.answer(
-            "✅ Код отправлен!\n\n"
+            "Код отправлен!\n\n"
             "Шаг 4 из 4: Введите код подтверждения из Telegram\n"
             "Пример: 12345\n\n"
             "Для отмены: /cancel"
@@ -394,7 +403,7 @@ async def process_code(message: types.Message, state: FSMContext):
         await client.disconnect()
         
         await message.answer(
-            "✅ Авторизация успешна!\n\n"
+            "Авторизация успешна!\n\n"
             "Теперь выполните /setup для настройки канала и группы."
         )
         await state.clear()
@@ -434,13 +443,31 @@ async def process_password(message: types.Message, state: FSMContext):
         await client.disconnect()
         
         await message.answer(
-            "✅ Авторизация успешна!\n\n"
+            "Авторизация успешна!\n\n"
             "Теперь выполните /setup для настройки канала и группы."
         )
         await state.clear()
         
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
+
+@dp.message(Command("debug_session"))
+async def debug_session(message: types.Message):
+    settings = get_settings(message.from_user.id)
+    if not settings:
+        await message.answer("Настройки не найдены")
+        return
+    
+    session_string = settings.get("session_string")
+    await message.answer(
+        f"Диагностика сессии:\n\n"
+        f"Тип session_string: {type(session_string).__name__}\n"
+        f"Длина: {len(session_string) if session_string else 0}\n"
+        f"Первые 50 символов: {str(session_string)[:50] if session_string else 'None'}\n"
+        f"API ID: {settings.get('api_id')}\n"
+        f"Канал: {settings.get('channel_id')}\n"
+        f"Группа: {settings.get('group_id')}"
+    )
 
 @dp.message(Command("test_session"))
 async def test_session(message: types.Message):
@@ -457,16 +484,26 @@ async def test_session(message: types.Message):
         await message.answer("Сессия отсутствует. Выполните /login")
         return
     
-    await message.answer("Тестирую сессию...")
+    if not isinstance(session_string, str):
+        await message.answer(f"Ошибка: session_string имеет тип {type(session_string).__name__}, а должен быть str")
+        return
+    
+    await message.answer(f"Тестирую сессию (длина: {len(session_string)})...")
     
     try:
-        client = Client("test", api_id=api_id, api_hash=api_hash, session_string=session_string, in_memory=True)
+        client = Client(
+            name="test",
+            api_id=api_id,
+            api_hash=api_hash,
+            session_string=session_string,
+            in_memory=True
+        )
         await client.start()
         me = await client.get_me()
-        await message.answer(f"✅ Сессия работает!\nПользователь: {me.first_name}")
+        await message.answer(f"Сессия работает!\nПользователь: {me.first_name}")
         await client.disconnect()
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {type(e).__name__}: {e}")
+        await message.answer(f"Ошибка: {type(e).__name__}: {e}")
 
 @dp.message(Command("reset_session"))
 async def reset_session(message: types.Message):
