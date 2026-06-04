@@ -1,6 +1,8 @@
 import asyncio
 import io
 import csv
+import secrets
+import time
 import sqlite3
 import os
 import re
@@ -72,14 +74,14 @@ _init_conn.close()
 pyrogram_clients: dict[int, Client] = {}
 tasks: dict[int, dict] = {}
 pending_cleanups: dict[str, dict] = {}
+auth_sessions: dict[str, dict] = {}   # token -> {user_id, client, phone, api_id, api_hash, expire}
 
 # ========== FSM ==========
 class AuthState(StatesGroup):
     waiting_for_api_id = State()
     waiting_for_api_hash = State()
     waiting_for_phone = State()
-    waiting_for_code = State()
-    waiting_for_password = State()
+    # Код вводится через веб-страницу, не через бота
 
 class SetupState(StatesGroup):
     waiting_for_channel_link = State()
@@ -436,139 +438,40 @@ async def process_phone(message: types.Message, state: FSMContext):
         client = Client("auth_temp", api_id=api_id, api_hash=api_hash, in_memory=True)
         await client.connect()
         sent_code = await client.send_code(phone)
-        await state.update_data(
-            phone=phone,
-            phone_code_hash=sent_code.phone_code_hash,
-            # Сохраняем ID клиента в state нельзя (не сериализуется),
-            # поэтому храним его в отдельном словаре
-        )
-        # Кэшируем клиент по user_id временно
-        pyrogram_clients[f"auth_{message.from_user.id}"] = client
+
+        # Генерируем одноразовый токен для веб-страницы
+        token = secrets.token_urlsafe(32)
+        auth_sessions[token] = {
+            "user_id": message.from_user.id,
+            "client": client,
+            "phone": phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "expire": time.time() + 600,  # 10 минут
+        }
+
+        auth_url = f"{RENDER_URL}/auth?token={token}"
 
         await message.answer(
-            "Код отправлен!\n\n"
-            "Шаг 4/4: Введите код из Telegram\n"
-            "(если пришло '12345' — введите 12345)\n\n"
-            "/cancel — отмена"
+            "Код отправлен в Telegram!\n\n"
+            "⚠️ Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
+            "Это защита от блокировки Telegram.\n\n"
+            f"👉 {auth_url}\n\n"
+            "Ссылка действует 10 минут.",
+            reply_markup=types.ReplyKeyboardRemove()
         )
-        await state.set_state(AuthState.waiting_for_code)
+        await state.clear()
 
     except FloodWait as e:
-        await message.answer(f"Telegram просит подождать {e.value} секунд. Попробуйте позже.")
+        await message.answer(f"Telegram просит подождать {e.value} сек. Попробуйте позже.",
+                             reply_markup=types.ReplyKeyboardRemove())
         await state.clear()
     except Exception as e:
-        await message.answer(f"Ошибка отправки кода: {type(e).__name__}: {e}\n\nПроверьте API ID и HASH.")
+        await message.answer(f"Ошибка: {type(e).__name__}: {e}\n\nПроверьте API ID и HASH.",
+                             reply_markup=types.ReplyKeyboardRemove())
         await state.clear()
 
-
-@dp.message(AuthState.waiting_for_code)
-async def process_code(message: types.Message, state: FSMContext):
-    if message.text.strip() == "/cancel":
-        await state.clear()
-        _cleanup_auth_client(message.from_user.id)
-        await message.answer("Отменено")
-        return
-
-    code = message.text.strip().replace(" ", "").replace("-", "")
-    data = await state.get_data()
-    phone            = data.get("phone")
-    phone_code_hash  = data.get("phone_code_hash")
-    api_id           = data.get("api_id")
-    api_hash         = data.get("api_hash")
-
-    client = pyrogram_clients.get(f"auth_{message.from_user.id}")
-    if not client:
-        await message.answer("Сессия авторизации потеряна. Начните заново: /login")
-        await state.clear()
-        return
-
-    try:
-        await client.sign_in(phone, phone_code_hash, code)
-        await _finalize_auth(message, state, client, api_id, api_hash)
-
-    except Exception as e:
-        err = str(e).lower()
-        if "session_password_needed" in err or "password" in err or "2fa" in err:
-            await message.answer(
-                "Требуется пароль двухфакторной аутентификации.\n\n"
-                "Введите пароль:\n\n"
-                "/cancel — отмена"
-            )
-            await state.set_state(AuthState.waiting_for_password)
-        elif "phone_code_invalid" in err:
-            await message.answer("Неверный код. Попробуйте ещё раз:")
-        elif "phone_code_expired" in err:
-            await message.answer("Код истёк. Начните заново: /login")
-            await state.clear()
-            _cleanup_auth_client(message.from_user.id)
-        else:
-            await message.answer(f"Ошибка: {type(e).__name__}: {e}\n\nНачните заново: /login")
-            await state.clear()
-            _cleanup_auth_client(message.from_user.id)
-
-
-@dp.message(AuthState.waiting_for_password)
-async def process_password(message: types.Message, state: FSMContext):
-    if message.text.strip() == "/cancel":
-        await state.clear()
-        _cleanup_auth_client(message.from_user.id)
-        await message.answer("Отменено")
-        return
-
-    password = message.text.strip()
-    data     = await state.get_data()
-    api_id   = data.get("api_id")
-    api_hash = data.get("api_hash")
-    client   = pyrogram_clients.get(f"auth_{message.from_user.id}")
-
-    if not client:
-        await message.answer("Сессия потеряна. Начните заново: /login")
-        await state.clear()
-        return
-
-    try:
-        await client.check_password(password)
-        await _finalize_auth(message, state, client, api_id, api_hash)
-    except Exception as e:
-        await message.answer(f"Неверный пароль или ошибка: {e}")
-
-
-async def _finalize_auth(message: types.Message, state: FSMContext,
-                         client: Client, api_id: int, api_hash: str):
-    """Сохраняет сессию после успешной авторизации."""
-    session_string = await client.export_session_string()
-    # export_session_string всегда возвращает str в pyrogram 2.x,
-    # но на всякий случай явно конвертируем
-    session_string = str(session_string)
-
-    print(f"[Auth] Получена сессия длиной {len(session_string)}")
-
-    save_settings(
-        message.from_user.id,
-        api_id=api_id,
-        api_hash=api_hash,
-        session_string=session_string,
-    )
-
-    await client.disconnect()
-    _cleanup_auth_client(message.from_user.id)
-
-    await message.answer(
-        "Авторизация успешна!\n\n"
-        "Теперь выполните /setup для настройки канала и группы."
-    )
-    await state.clear()
-
-
-def _cleanup_auth_client(user_id: int):
-    key = f"auth_{user_id}"
-    if key in pyrogram_clients:
-        try:
-            # Не ждём disconnect, просто удаляем из кэша
-            pass
-        except Exception:
-            pass
-        del pyrogram_clients[key]
 
 
 # ----- DEBUG -----
@@ -1178,10 +1081,160 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
 
 # ========== FLASK ==========
 
+AUTH_PAGE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Авторизация</title>
+<style>
+  body{font-family:sans-serif;max-width:420px;margin:60px auto;padding:0 20px;background:#f5f5f5}
+  .card{background:#fff;border-radius:12px;padding:30px;box-shadow:0 2px 12px rgba(0,0,0,.1)}
+  h2{margin:0 0 8px;font-size:1.3em}
+  p{color:#555;margin:0 0 20px;font-size:.95em;line-height:1.5}
+  input{width:100%;box-sizing:border-box;padding:12px;font-size:1em;border:1.5px solid #ddd;border-radius:8px;margin-bottom:14px}
+  input:focus{outline:none;border-color:#2196f3}
+  button{width:100%;padding:13px;font-size:1em;background:#2196f3;color:#fff;border:none;border-radius:8px;cursor:pointer}
+  button:hover{background:#1976d2}
+  .msg{margin-top:16px;padding:12px;border-radius:8px;font-size:.95em}
+  .ok{background:#e8f5e9;color:#2e7d32}
+  .err{background:#ffebee;color:#c62828}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Введите код из Telegram</h2>
+  <p>Telegram прислал вам код подтверждения.<br>Введите его ниже. Если есть пароль 2FA — он тоже появится.</p>
+  <input id="code" type="text" inputmode="numeric" placeholder="Например: 12345" maxlength="10" autofocus>
+  <div id="pass_block" style="display:none">
+    <p style="margin:0 0 8px">Введите пароль двухфакторной аутентификации:</p>
+    <input id="password" type="password" placeholder="Пароль 2FA">
+  </div>
+  <button onclick="submit()">Войти</button>
+  <div id="msg"></div>
+</div>
+<script>
+const token = new URLSearchParams(location.search).get('token');
+async function submit(){
+  const code = document.getElementById('code').value.trim();
+  const password = document.getElementById('password').value.trim();
+  document.getElementById('msg').innerHTML = '<div class="msg">Проверяю...</div>';
+  const r = await fetch('/auth/verify', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({token, code, password})
+  });
+  const d = await r.json();
+  if(d.ok){
+    document.getElementById('msg').innerHTML = '<div class="msg ok">✅ ' + d.message + '</div>';
+  } else if(d.need_password){
+    document.getElementById('pass_block').style.display = 'block';
+    document.getElementById('msg').innerHTML = '<div class="msg err">⚠️ Требуется пароль 2FA</div>';
+  } else {
+    document.getElementById('msg').innerHTML = '<div class="msg err">❌ ' + d.message + '</div>';
+  }
+}
+document.addEventListener('keydown', e => { if(e.key==='Enter') submit(); });
+</script>
+</body>
+</html>"""
+
 @app.route('/')
 @app.route('/health')
 def health():
     return jsonify({"status": "ok", "tasks": len(tasks)})
+
+
+@app.route('/auth')
+def auth_page():
+    token = request.args.get('token', '')
+    if not token or token not in auth_sessions:
+        return "<h2>Ссылка недействительна или устарела</h2>", 400
+    session = auth_sessions[token]
+    if time.time() > session['expire']:
+        del auth_sessions[token]
+        return "<h2>Ссылка устарела. Начните /login заново</h2>", 400
+    return AUTH_PAGE
+
+
+@app.route('/auth/verify', methods=['POST'])
+def auth_verify():
+    data = request.get_json()
+    token    = data.get('token', '')
+    code     = data.get('code', '').strip()
+    password = data.get('password', '').strip()
+
+    if not token or token not in auth_sessions:
+        return jsonify(ok=False, message="Ссылка недействительна")
+
+    session = auth_sessions[token]
+    if time.time() > session['expire']:
+        del auth_sessions[token]
+        return jsonify(ok=False, message="Ссылка устарела. Начните /login заново")
+
+    client = session['client']
+    phone  = session['phone']
+    pch    = session['phone_code_hash']
+    user_id = session['user_id']
+    api_id  = session['api_id']
+    api_hash = session['api_hash']
+
+    # Запускаем async в отдельном event loop (Flask синхронный)
+    import asyncio as _asyncio
+
+    async def do_signin():
+        try:
+            await client.sign_in(phone, pch, code)
+            return {"ok": True}
+        except Exception as e:
+            err = str(e).lower()
+            if "session_password_needed" in err or "password" in err:
+                return {"need_password": True}
+            raise
+
+    async def do_2fa(pwd):
+        await client.check_password(pwd)
+
+    async def get_session():
+        s = await client.export_session_string()
+        await client.disconnect()
+        return str(s)
+
+    loop = _asyncio.new_event_loop()
+    try:
+        if not password:
+            result = loop.run_until_complete(do_signin())
+            if result.get("need_password"):
+                return jsonify(ok=False, need_password=True, message="Требуется пароль 2FA")
+        else:
+            # Уже прошли sign_in, вводим 2FA
+            try:
+                loop.run_until_complete(do_2fa(password))
+            except Exception as e:
+                return jsonify(ok=False, message=f"Неверный пароль: {e}")
+
+        session_string = loop.run_until_complete(get_session())
+        save_settings(user_id, api_id=api_id, api_hash=api_hash, session_string=session_string)
+        del auth_sessions[token]
+
+        # Уведомляем пользователя в Telegram (из другого loop)
+        async def notify():
+            await bot.send_message(user_id,
+                "Авторизация успешна! ✅\n\nТеперь выполните /setup для настройки канала и группы.")
+        _asyncio.run_coroutine_threadsafe(notify(), asyncio.get_event_loop())
+
+        return jsonify(ok=True, message="Авторизация успешна! Вернитесь в Telegram.")
+
+    except Exception as e:
+        err = str(e).lower()
+        if "phone_code_invalid" in err:
+            return jsonify(ok=False, message="Неверный код. Попробуйте ещё раз.")
+        if "phone_code_expired" in err:
+            del auth_sessions[token]
+            return jsonify(ok=False, message="Код истёк. Начните /login заново.")
+        return jsonify(ok=False, message=f"Ошибка: {e}")
+    finally:
+        loop.close()
 
 
 def run_flask():
