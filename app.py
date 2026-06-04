@@ -1018,8 +1018,8 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
     # Собираем участников группы
     members = set()
     try:
-        async for member in bot.get_chat_members(settings["group_id"]):
-            if not member.user.is_bot:
+        async for member in client.get_chat_members(settings["group_id"]):
+            if member.user and not member.user.is_bot:
                 members.add(member.user.id)
     except Exception as e:
         await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
