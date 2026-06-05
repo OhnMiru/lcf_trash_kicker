@@ -1098,14 +1098,35 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         )
         return
 
-    # Конвертируем channel_id из Bot API формата в Pyrogram формат
     pyrogram_channel_id = to_pyrogram_channel_id(settings["channel_id"])
+
+    # Резолвим peer — Pyrogram должен "знать" канал перед работой с ним
+    try:
+        await client.get_chat(pyrogram_channel_id)
+        print(f"[Task] Peer {pyrogram_channel_id} успешно резолвнут")
+    except Exception as e:
+        print(f"[Task] Не удалось резолвнуть через ID ({e}), пробуем вступить по инвайт-ссылке...")
+        try:
+            invite_link = await bot.export_chat_invite_link(settings["channel_id"])
+            await client.join_chat(invite_link)
+            print(f"[Task] Вступил в канал через инвайт-ссылку")
+            await asyncio.sleep(2)
+        except Exception as e2:
+            err = str(e2).lower()
+            if "already" not in err and "user_already_participant" not in err:
+                await bot.send_message(
+                    reply_chat_id,
+                    f"Ошибка: не удалось получить доступ к каналу.\n{e2}\n\n"
+                    f"Попробуйте выполнить /join_group вручную."
+                )
+                return
+            print(f"[Task] Уже в канале, продолжаем")
 
     # Собираем комментаторов
     commenters = await get_commenters(client, pyrogram_channel_id, post_id)
     await bot.send_message(reply_chat_id, f"Комментаторов: {len(commenters)}")
 
-    # Собираем подписчиков канала через Pyrogram
+    # Собираем подписчиков канала
     members = set()
     try:
         async for member in client.get_chat_members(pyrogram_channel_id):
@@ -1114,7 +1135,8 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
     except Exception as e:
         await bot.send_message(
             reply_chat_id,
-            f"Ошибка сбора подписчиков канала: {e}"
+            f"Ошибка сбора подписчиков канала: {e}\n\n"
+            f"Попробуйте выполнить /join_group и повторить /check"
         )
         return
 
@@ -1126,7 +1148,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         await bot.send_message(reply_chat_id, f"Все отметились под постом {post_link}")
         return
 
-    # Формируем список неотметившихся
     user_lines = []
     for uid in to_kick:
         try:
@@ -1136,8 +1157,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         except Exception:
             user_lines.append(str(uid))
 
-    # Telegram ограничивает сообщение ~4096 символами — разбиваем если нужно
-    CHUNK = 80  # строк за раз
+    CHUNK = 80
     chunks = [user_lines[i:i + CHUNK] for i in range(0, len(user_lines), CHUNK)]
 
     header = (
