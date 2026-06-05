@@ -460,6 +460,17 @@ async def process_phone(message: types.Message, state: FSMContext):
 
 # ----- JOIN GROUP -----
 
+async def find_group_in_dialogs(client: Client, group_id: int):
+    """Ищет чат группы в диалогах Pyrogram. Возвращает объект чата или None."""
+    try:
+        async for dialog in client.get_dialogs():
+            if dialog.chat and dialog.chat.id == group_id:
+                return dialog.chat
+    except Exception as e:
+        print(f"[Dialogs] Ошибка поиска в диалогах: {e}")
+    return None
+
+
 @dp.message(Command("join_group"))
 async def cmd_join_group(message: types.Message):
     settings = get_settings(message.from_user.id)
@@ -470,41 +481,47 @@ async def cmd_join_group(message: types.Message):
         await message.answer("Сначала выполните /setup")
         return
 
-    await message.answer("Получаю инвайт-ссылку и подключаю аккаунт к группе...")
-
     client = await get_pyrogram_client(message.from_user.id)
     if not client:
         await message.answer("Сессия недоступна. Выполните /reset_session и /login")
         return
 
-    try:
-        # Сначала проверяем — может уже состоит в группе
-        try:
-            chat = await client.get_chat(settings["group_id"])
-            # Если дошли сюда — чат уже известен Pyrogram
-            await message.answer(
-                f"Аккаунт уже подключён к группе «{chat.title}».\n\n"
-                f"Всё в порядке, /check должен работать."
-            )
-            return
-        except Exception:
-            pass  # Не известен — идём дальше
+    await message.answer("Проверяю доступ к группе...")
 
-        # Получаем инвайт-ссылку через бота (он уже админ)
-        invite_link = await bot.export_chat_invite_link(settings["group_id"])
-        await message.answer("Ссылка получена, вступаю в группу...")
+    # Сначала ищем в диалогах — самый надёжный способ
+    group_chat = await find_group_in_dialogs(client, settings["group_id"])
 
-        await client.join_chat(invite_link)
+    if group_chat:
         await message.answer(
-            "Готово! Аккаунт подключён к группе.\n\n"
-            "Теперь /check будет работать корректно."
+            f"Аккаунт уже подключён к группе «{group_chat.title}».\n\n"
+            f"Всё в порядке, /check должен работать."
         )
+        return
+
+    # Не нашли в диалогах — вступаем по инвайт-ссылке
+    await message.answer("Группа не найдена в диалогах. Вступаю по инвайт-ссылке...")
+    try:
+        invite_link = await bot.export_chat_invite_link(settings["group_id"])
+        await client.join_chat(invite_link)
+
+        # Проверяем после вступления
+        group_chat = await find_group_in_dialogs(client, settings["group_id"])
+        if group_chat:
+            await message.answer(
+                f"Готово! Аккаунт подключён к группе «{group_chat.title}».\n\n"
+                f"Теперь /check будет работать корректно."
+            )
+        else:
+            await message.answer(
+                "Вступил в группу, но она ещё не появилась в диалогах.\n"
+                "Подождите минуту и попробуйте /check."
+            )
     except Exception as e:
         err = str(e).lower()
         if "already" in err or "user_already_participant" in err:
             await message.answer(
-                "Аккаунт уже состоит в группе — всё в порядке.\n"
-                "Попробуйте /check снова."
+                "Аккаунт уже в группе, но она не найдена в диалогах.\n"
+                "Попробуйте /check — возможно всё уже работает."
             )
         else:
             await message.answer(
@@ -828,49 +845,7 @@ async def cmd_check(message: types.Message):
 
 
 # ----- STATUS / CANCEL -----
-@dp.message(Command("debug_group"))
-async def debug_group(message: types.Message):
-    settings = get_settings(message.from_user.id)
-    if not settings or not settings.get("group_id"):
-        await message.answer("Группа не настроена")
-        return
 
-    client = await get_pyrogram_client(message.from_user.id)
-    if not client:
-        await message.answer("Сессия недоступна")
-        return
-
-    group_id = settings["group_id"]
-    await message.answer(f"Пробую резолвить group_id={group_id}...")
-
-    # Пробуем все варианты
-    variants = [
-        group_id,
-        str(group_id),
-        int(str(group_id).replace("-100", "-")) if str(group_id).startswith("-100") else None,
-    ]
-
-    for v in variants:
-        if v is None:
-            continue
-        try:
-            chat = await client.get_chat(v)
-            await message.answer(f"✅ Сработало с вариантом {v!r}\nНазвание: {chat.title}\nID в Pyrogram: {chat.id}")
-            return
-        except Exception as e:
-            await message.answer(f"❌ Вариант {v!r}: {e}")
-
-    # Пробуем поиск по диалогам
-    await message.answer("Ищу группу в диалогах...")
-    try:
-        async for dialog in client.get_dialogs():
-            if dialog.chat and dialog.chat.id == group_id:
-                await message.answer(f"✅ Найдено в диалогах!\nID: {dialog.chat.id}\nНазвание: {dialog.chat.title}")
-                return
-        await message.answer("Группа не найдена в диалогах. Попробуйте /join_group заново.")
-    except Exception as e:
-        await message.answer(f"Ошибка поиска в диалогах: {e}")
-        
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     user_tasks = {
@@ -1093,16 +1068,27 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
     await bot.send_message(reply_chat_id, f"Комментаторов: {len(commenters)}")
 
     # Собираем участников группы через Pyrogram
+    # Используем поиск по диалогам — единственный надёжный способ для нестандартных ID
     members = set()
     try:
-        async for member in client.get_chat_members(settings["group_id"]):
+        group_chat = await find_group_in_dialogs(client, settings["group_id"])
+        if group_chat is None:
+            await bot.send_message(
+                reply_chat_id,
+                "Группа не найдена в диалогах аккаунта.\n"
+                "Выполните /join_group и повторите /check."
+            )
+            return
+
+        async for member in client.get_chat_members(group_chat.id):
             if member.user and not member.user.is_bot:
                 members.add(member.user.id)
+
     except Exception as e:
         await bot.send_message(
             reply_chat_id,
             f"Ошибка сбора участников группы: {e}\n\n"
-            f"Выполните /join_group чтобы подключить аккаунт к группе, затем повторите /check"
+            f"Выполните /join_group и повторите /check"
         )
         return
 
