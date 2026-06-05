@@ -82,7 +82,6 @@ class AuthState(StatesGroup):
     waiting_for_api_id = State()
     waiting_for_api_hash = State()
     waiting_for_phone = State()
-    # Код вводится через веб-страницу, не через бота
 
 class SetupState(StatesGroup):
     waiting_for_channel_link = State()
@@ -108,11 +107,6 @@ def parse_post_url(url: str):
     return channel_id, post_id
 
 
-def extract_username_from_link(link: str):
-    match = re.search(r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)', link)
-    return match.group(1) if match else None
-
-
 def get_settings(user_id: int) -> dict | None:
     conn = get_db_conn()
     try:
@@ -136,13 +130,12 @@ def get_settings(user_id: int) -> dict | None:
 def save_settings(user_id: int, **kwargs):
     """Сохраняет только переданные поля, остальные берёт из существующей записи."""
     existing = get_settings(user_id) or {}
-    channel_id   = kwargs.get("channel_id",    existing.get("channel_id"))
-    group_id     = kwargs.get("group_id",       existing.get("group_id"))
-    session_str  = kwargs.get("session_string", existing.get("session_string"))
-    api_id       = kwargs.get("api_id",         existing.get("api_id"))
-    api_hash     = kwargs.get("api_hash",       existing.get("api_hash"))
+    channel_id  = kwargs.get("channel_id",    existing.get("channel_id"))
+    group_id    = kwargs.get("group_id",       existing.get("group_id"))
+    session_str = kwargs.get("session_string", existing.get("session_string"))
+    api_id      = kwargs.get("api_id",         existing.get("api_id"))
+    api_hash    = kwargs.get("api_hash",       existing.get("api_hash"))
 
-    # Гарантируем, что session_string — строка или None
     if session_str is not None:
         session_str = str(session_str)
 
@@ -172,12 +165,10 @@ def clear_session(user_id: int):
 
 async def get_pyrogram_client(user_id: int) -> Client | None:
     """Возвращает активный Pyrogram-клиент, создаёт новый если нужно."""
-    # Проверяем кэш
     if user_id in pyrogram_clients:
         client = pyrogram_clients[user_id]
         if client.is_connected:
             return client
-        # Клиент есть, но отключён — убираем из кэша
         del pyrogram_clients[user_id]
 
     settings = get_settings(user_id)
@@ -228,13 +219,9 @@ async def get_pyrogram_client(user_id: int) -> Client | None:
 
 
 async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[int]:
-    """
-    Собирает ID всех комментаторов под постом.
-    Использует get_discussion_replies — это правильный метод для комментариев.
-    """
+    """Собирает ID всех комментаторов под постом."""
     commenters = set()
     try:
-        # Метод 1: get_discussion_replies (лучший вариант для комментариев)
         async for msg in client.get_discussion_replies(channel_id, post_id):
             if msg.from_user and not msg.from_user.is_bot:
                 commenters.add(msg.from_user.id)
@@ -242,7 +229,6 @@ async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[i
     except Exception as e:
         print(f"[Commenters] discussion_replies недоступен: {e}, пробуем fallback...")
         try:
-            # Метод 2: fallback — ищем через историю linked-группы
             chat = await client.get_chat(channel_id)
             if chat.linked_chat:
                 group_id = chat.linked_chat.id
@@ -334,6 +320,7 @@ async def cmd_start(message: types.Message):
         "Бот для автоматической чистки канала\n\n"
         "/login — авторизация (один раз)\n"
         "/setup — настройка канала и группы\n"
+        "/join_group — подключить аккаунт к группе (один раз после setup)\n"
         "/check ссылка часы — запустить проверку\n"
         "/status — активные задачи\n"
         "/cancel ID — отменить задачу\n"
@@ -409,13 +396,11 @@ async def process_api_hash(message: types.Message, state: FSMContext):
 
 @dp.message(AuthState.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    # Отмена
     if message.text and message.text.strip() == "/cancel":
         await state.clear()
         await message.answer("Отменено", reply_markup=types.ReplyKeyboardRemove())
         return
 
-    # Получаем номер — из контакта (кнопка) или из текста
     if message.contact:
         phone = message.contact.phone_number
         if not phone.startswith('+'):
@@ -440,11 +425,10 @@ async def process_phone(message: types.Message, state: FSMContext):
         await client.connect()
         sent_code = await client.send_code(phone)
 
-        # Генерируем одноразовый токен для веб-страницы
         token = secrets.token_urlsafe(32)
         auth_sessions[token] = {
             "user_id": message.from_user.id,
-            "client": client,          # клиент живёт до ввода кода
+            "client": client,
             "phone": phone,
             "phone_code_hash": sent_code.phone_code_hash,
             "api_id": api_id,
@@ -473,6 +457,60 @@ async def process_phone(message: types.Message, state: FSMContext):
                              reply_markup=types.ReplyKeyboardRemove())
         await state.clear()
 
+
+# ----- JOIN GROUP -----
+
+@dp.message(Command("join_group"))
+async def cmd_join_group(message: types.Message):
+    settings = get_settings(message.from_user.id)
+    if not settings or not settings.get("session_string"):
+        await message.answer("Сначала выполните /login")
+        return
+    if not settings.get("group_id"):
+        await message.answer("Сначала выполните /setup")
+        return
+
+    await message.answer("Получаю инвайт-ссылку и подключаю аккаунт к группе...")
+
+    client = await get_pyrogram_client(message.from_user.id)
+    if not client:
+        await message.answer("Сессия недоступна. Выполните /reset_session и /login")
+        return
+
+    try:
+        # Сначала проверяем — может уже состоит в группе
+        try:
+            chat = await client.get_chat(settings["group_id"])
+            # Если дошли сюда — чат уже известен Pyrogram
+            await message.answer(
+                f"Аккаунт уже подключён к группе «{chat.title}».\n\n"
+                f"Всё в порядке, /check должен работать."
+            )
+            return
+        except Exception:
+            pass  # Не известен — идём дальше
+
+        # Получаем инвайт-ссылку через бота (он уже админ)
+        invite_link = await bot.export_chat_invite_link(settings["group_id"])
+        await message.answer("Ссылка получена, вступаю в группу...")
+
+        await client.join_chat(invite_link)
+        await message.answer(
+            "Готово! Аккаунт подключён к группе.\n\n"
+            "Теперь /check будет работать корректно."
+        )
+    except Exception as e:
+        err = str(e).lower()
+        if "already" in err or "user_already_participant" in err:
+            await message.answer(
+                "Аккаунт уже состоит в группе — всё в порядке.\n"
+                "Попробуйте /check снова."
+            )
+        else:
+            await message.answer(
+                f"Ошибка: {e}\n\n"
+                f"Убедитесь, что бот является администратором группы."
+            )
 
 
 # ----- DEBUG -----
@@ -505,7 +543,6 @@ async def test_session(message: types.Message):
 
     await message.answer("Тестирую сессию...")
 
-    # Сбрасываем кэш, чтобы создать свежее подключение
     if message.from_user.id in pyrogram_clients:
         try:
             await pyrogram_clients[message.from_user.id].disconnect()
@@ -531,7 +568,6 @@ async def test_session(message: types.Message):
 
 @dp.message(Command("reset_session"))
 async def reset_session(message: types.Message):
-    # Отключаем активный клиент
     if message.from_user.id in pyrogram_clients:
         try:
             await pyrogram_clients[message.from_user.id].disconnect()
@@ -592,7 +628,10 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     try:
         bot_member = await bot.get_chat_member(chat.id, (await bot.get_me()).id)
         if bot_member.status not in ["administrator", "creator"]:
-            await message.answer(f"Бот не является администратором канала «{chat.title}»\nДобавьте бота как админа и попробуйте снова")
+            await message.answer(
+                f"Бот не является администратором канала «{chat.title}»\n"
+                f"Добавьте бота как админа и попробуйте снова"
+            )
             return
     except Exception:
         await message.answer("Не удалось проверить права бота — убедитесь, что бот добавлен в канал")
@@ -653,7 +692,10 @@ async def process_group_link(message: types.Message, state: FSMContext):
     try:
         bot_member = await bot.get_chat_member(chat.id, (await bot.get_me()).id)
         if bot_member.status not in ["administrator", "creator"]:
-            await message.answer(f"Бот не является администратором группы «{chat.title}»\nДобавьте бота как админа и попробуйте снова")
+            await message.answer(
+                f"Бот не является администратором группы «{chat.title}»\n"
+                f"Добавьте бота как админа и попробуйте снова"
+            )
             return
     except Exception:
         await message.answer("Не удалось проверить права бота — убедитесь, что бот добавлен в группу")
@@ -668,7 +710,8 @@ async def process_group_link(message: types.Message, state: FSMContext):
         f"Канал ID: {settings['channel_id']}\n"
         f"Группа: {chat.title}\n"
         f"Группа ID: {chat.id}\n\n"
-        f"Используйте /check для запуска проверки"
+        f"Следующий шаг: выполните /join_group чтобы подключить аккаунт к группе.\n"
+        f"Это нужно сделать один раз."
     )
 
 
@@ -723,7 +766,6 @@ async def cmd_check(message: types.Message):
         await message.answer("Неверный формат ссылки на пост")
         return
 
-    # Резолвим username в ID
     actual_channel_id = channel_id_or_username
     if isinstance(actual_channel_id, str):
         try:
@@ -808,7 +850,6 @@ async def cmd_status(message: types.Message):
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
-    # Отменяем FSM если активен
     current_state = await state.get_state()
     if current_state:
         await state.clear()
@@ -837,7 +878,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data.startswith("edit_"))
 async def handle_edit(callback: types.CallbackQuery):
-    temp_id = callback.data[5:]  # убираем "edit_"
+    temp_id = callback.data[5:]
     if temp_id not in pending_cleanups:
         await callback.answer("Данные устарели", show_alert=True)
         return
@@ -911,9 +952,9 @@ async def process_exclude_list(message: types.Message):
         f"Удалить из канала?"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="ДА",              callback_data=f"confirm_yes_{active_temp_id}"),
-        InlineKeyboardButton(text="ИЗМЕНИТЬ ЕЩЁ",   callback_data=f"edit_{active_temp_id}"),
-        InlineKeyboardButton(text="НЕТ",             callback_data=f"confirm_no_{active_temp_id}"),
+        InlineKeyboardButton(text="ДА",            callback_data=f"confirm_yes_{active_temp_id}"),
+        InlineKeyboardButton(text="ИЗМЕНИТЬ ЕЩЁ", callback_data=f"edit_{active_temp_id}"),
+        InlineKeyboardButton(text="НЕТ",           callback_data=f"confirm_no_{active_temp_id}"),
     ]])
     await bot.send_message(message.chat.id, confirm_text, reply_markup=keyboard)
     await message.delete()
@@ -921,7 +962,7 @@ async def process_exclude_list(message: types.Message):
 
 @dp.callback_query(lambda c: c.data.startswith("confirm_yes_"))
 async def handle_confirm_yes(callback: types.CallbackQuery):
-    temp_id = callback.data[12:]  # убираем "confirm_yes_"
+    temp_id = callback.data[12:]
     if temp_id not in pending_cleanups:
         await callback.answer("Данные устарели", show_alert=True)
         return
@@ -969,7 +1010,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("confirm_no_"))
 async def handle_confirm_no(callback: types.CallbackQuery):
-    temp_id = callback.data[11:]  # убираем "confirm_no_"
+    temp_id = callback.data[11:]
     if temp_id in pending_cleanups:
         del pending_cleanups[temp_id]
     await callback.message.edit_text("Удаление из канала отменено")
@@ -982,18 +1023,13 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
                        post_link: str, user_id: int):
     print(f"[Task] Запущена задача для поста {post_id}")
 
-    # Ждём дедлайна
     wait_seconds = deadline - asyncio.get_event_loop().time()
     if wait_seconds > 0:
         print(f"[Task] Ждём {wait_seconds:.0f} сек для поста {post_id}")
         await asyncio.sleep(wait_seconds)
 
-    # Удаляем из активных
     tasks.pop(post_id, None)
     _delete_task(post_id)
-
-    # Проверяем, не была ли задача отменена
-    # (если post_id удалён из tasks до истечения времени — значит cancel)
 
     settings = get_settings(user_id)
     if not settings:
@@ -1002,7 +1038,6 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
 
     await bot.send_message(reply_chat_id, f"Проверяю пост {post_link}...")
 
-    # Получаем Pyrogram-клиент
     client = await get_pyrogram_client(user_id)
     if not client:
         await bot.send_message(
@@ -1015,37 +1050,18 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
     commenters = await get_commenters(client, settings["channel_id"], post_id)
     await bot.send_message(reply_chat_id, f"Комментаторов: {len(commenters)}")
 
-    # Собираем участников группы
+    # Собираем участников группы через Pyrogram
     members = set()
     try:
-        # Pyrogram иногда не резолвит числовой ID — пробуем несколько форматов
-        group_peer = None
-        group_id_raw = settings["group_id"]  # например -1003950691480
-        
-        # Убираем -100 и пробуем как int
-        group_id_str = str(group_id_raw)
-        if group_id_str.startswith("-100"):
-            short_id = int(group_id_str[4:])  # без -100
-        else:
-            short_id = int(group_id_str.lstrip("-"))
-        
-        # Пробуем получить чат через get_chat чтобы закэшировать peer
-        try:
-            chat_obj = await client.get_chat(group_id_raw)
-            group_peer = chat_obj.id
-        except Exception:
-            try:
-                chat_obj = await client.get_chat(f"-100{short_id}")
-                group_peer = chat_obj.id
-            except Exception:
-                group_peer = group_id_raw
-
-        async for member in client.get_chat_members(group_peer):
+        async for member in client.get_chat_members(settings["group_id"]):
             if member.user and not member.user.is_bot:
                 members.add(member.user.id)
-                
     except Exception as e:
-        await bot.send_message(reply_chat_id, f"Ошибка сбора участников группы: {e}")
+        await bot.send_message(
+            reply_chat_id,
+            f"Ошибка сбора участников группы: {e}\n\n"
+            f"Выполните /join_group чтобы подключить аккаунт к группе, затем повторите /check"
+        )
         return
 
     await bot.send_message(reply_chat_id, f"Участников группы: {len(members)}")
@@ -1056,7 +1072,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         await bot.send_message(reply_chat_id, f"Все отметились под постом {post_link}")
         return
 
-    # Кикаем из группы обсуждения
+    # Кикаем из группы обсуждения через бота
     kicked_group = 0
     for uid in to_kick:
         try:
@@ -1080,7 +1096,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         writer.writerow([uid])
     csv_bytes = output.getvalue().encode("utf-8")
 
-    # Список для подтверждения
+    # Список для подтверждения (первые 30)
     user_lines = []
     for uid in to_kick[:30]:
         try:
@@ -1197,6 +1213,7 @@ document.addEventListener('keydown', e => { if(e.key==='Enter') submit(); });
 </body>
 </html>"""
 
+
 @app.route('/')
 @app.route('/health')
 def health():
@@ -1217,12 +1234,6 @@ def auth_page():
 
 @app.route('/auth/verify', methods=['POST'])
 def auth_verify():
-    """
-    Flask синхронный, но Pyrogram требует своего event loop.
-    Решение: всю async-логику гоним через bot_loop (основной loop бота)
-    с помощью run_coroutine_threadsafe + future.result().
-    Клиент пересоздаётся здесь — не передаём его между loops.
-    """
     data     = request.get_json()
     token    = data.get('token', '')
     code     = data.get('code', '').strip()
@@ -1246,11 +1257,9 @@ def auth_verify():
         return jsonify(ok=False, message="Сервер ещё не готов, попробуйте через 5 секунд")
 
     async def do_auth():
-        """Используем уже подключённый клиент из auth_sessions (создан в process_phone)."""
-        client = session['client']  # живой клиент, подключённый в bot_loop
+        client = session['client']
         try:
             if not password:
-                # Первый вызов: вводим код
                 try:
                     await client.sign_in(phone, pch, code)
                 except Exception as e:
@@ -1258,10 +1267,8 @@ def auth_verify():
                         return {"need_password": True}
                     raise
             else:
-                # Второй вызов: 2FA пароль (sign_in уже прошёл, клиент ждёт пароль)
                 await client.check_password(password)
 
-            # Успешная авторизация
             session_string = str(await client.export_session_string())
             save_settings(user_id, api_id=api_id, api_hash=api_hash, session_string=session_string)
             auth_sessions.pop(token, None)
@@ -1272,7 +1279,10 @@ def auth_verify():
 
             await bot.send_message(
                 user_id,
-                "Авторизация успешна! ✅\n\nТеперь выполните /setup для настройки канала и группы."
+                "Авторизация успешна! ✅\n\n"
+                "Следующие шаги:\n"
+                "1. /setup — настройте канал и группу\n"
+                "2. /join_group — подключите аккаунт к группе"
             )
             return {"ok": True}
 
@@ -1282,7 +1292,6 @@ def auth_verify():
                 return {"need_password": True}
             raise
 
-    # Запускаем корутину в bot_loop и ждём результата (таймаут 30 сек)
     future = asyncio.run_coroutine_threadsafe(do_auth(), bot_loop)
     try:
         result = future.result(timeout=30)
@@ -1316,7 +1325,10 @@ async def self_ping():
         await asyncio.sleep(60)
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{RENDER_URL}/health", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    f"{RENDER_URL}/health",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     if resp.status == 200:
                         print("[Ping] OK")
         except Exception as e:
