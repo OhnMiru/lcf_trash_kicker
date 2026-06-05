@@ -87,6 +87,17 @@ class SetupState(StatesGroup):
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
+def to_pyrogram_channel_id(channel_id: int) -> int:
+    """
+    Конвертирует channel_id из формата Bot API (-100XXXXXXXXX)
+    в числовой peer ID для Pyrogram (без префикса -100).
+    """
+    channel_id_str = str(channel_id)
+    if channel_id_str.startswith("-100"):
+        return int(channel_id_str[4:])
+    return channel_id
+
+
 def parse_post_url(url: str):
     """Парсит ссылку на пост, возвращает (channel_id_or_username, post_id)."""
     clean_url = re.sub(r'https?://(telegram\.me|t\.me)/', '', url)
@@ -217,7 +228,10 @@ async def get_pyrogram_client(user_id: int) -> Client | None:
 
 
 async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[int]:
-    """Собирает ID всех комментаторов под постом."""
+    """
+    Собирает ID всех комментаторов под постом.
+    channel_id передаётся в формате Pyrogram (без префикса -100).
+    """
     commenters = set()
     try:
         async for msg in client.get_discussion_replies(channel_id, post_id):
@@ -242,6 +256,10 @@ async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[i
 
 async def kick_from_channel(client: Client, channel_id: int, user_ids: list[int],
                             progress_callback=None) -> dict:
+    """
+    Кикает пользователей из канала.
+    channel_id передаётся в формате Pyrogram (без префикса -100).
+    """
     if not user_ids:
         return {"success": 0, "errors": 0, "total": 0}
     success = 0
@@ -1004,6 +1022,9 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
 
     settings = get_settings(data["user_id"])
 
+    # Конвертируем channel_id для Pyrogram
+    pyrogram_channel_id = to_pyrogram_channel_id(settings["channel_id"])
+
     async def update_progress(current, total):
         try:
             await callback.message.edit_text(
@@ -1013,10 +1034,10 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
             pass
 
     result = await kick_from_channel(
-        client, settings["channel_id"], data["user_ids_list"], update_progress
+        client, pyrogram_channel_id, data["user_ids_list"], update_progress
     )
 
-    # Кикаем из группы обсуждения через бота
+    # Кикаем из группы обсуждения через бота (Bot API, здесь -100 формат нужен)
     kicked_group = 0
     if settings.get("group_id"):
         for uid in data["user_ids_list"]:
@@ -1077,14 +1098,17 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         )
         return
 
+    # Конвертируем channel_id из Bot API формата в Pyrogram формат
+    pyrogram_channel_id = to_pyrogram_channel_id(settings["channel_id"])
+
     # Собираем комментаторов
-    commenters = await get_commenters(client, settings["channel_id"], post_id)
+    commenters = await get_commenters(client, pyrogram_channel_id, post_id)
     await bot.send_message(reply_chat_id, f"Комментаторов: {len(commenters)}")
 
     # Собираем подписчиков канала через Pyrogram
     members = set()
     try:
-        async for member in client.get_chat_members(settings["channel_id"]):
+        async for member in client.get_chat_members(pyrogram_channel_id):
             if member.user and not member.user.is_bot:
                 members.add(member.user.id)
     except Exception as e:
