@@ -828,7 +828,49 @@ async def cmd_check(message: types.Message):
 
 
 # ----- STATUS / CANCEL -----
+@dp.message(Command("debug_group"))
+async def debug_group(message: types.Message):
+    settings = get_settings(message.from_user.id)
+    if not settings or not settings.get("group_id"):
+        await message.answer("Группа не настроена")
+        return
 
+    client = await get_pyrogram_client(message.from_user.id)
+    if not client:
+        await message.answer("Сессия недоступна")
+        return
+
+    group_id = settings["group_id"]
+    await message.answer(f"Пробую резолвить group_id={group_id}...")
+
+    # Пробуем все варианты
+    variants = [
+        group_id,
+        str(group_id),
+        int(str(group_id).replace("-100", "-")) if str(group_id).startswith("-100") else None,
+    ]
+
+    for v in variants:
+        if v is None:
+            continue
+        try:
+            chat = await client.get_chat(v)
+            await message.answer(f"✅ Сработало с вариантом {v!r}\nНазвание: {chat.title}\nID в Pyrogram: {chat.id}")
+            return
+        except Exception as e:
+            await message.answer(f"❌ Вариант {v!r}: {e}")
+
+    # Пробуем поиск по диалогам
+    await message.answer("Ищу группу в диалогах...")
+    try:
+        async for dialog in client.get_dialogs():
+            if dialog.chat and dialog.chat.id == group_id:
+                await message.answer(f"✅ Найдено в диалогах!\nID: {dialog.chat.id}\nНазвание: {dialog.chat.title}")
+                return
+        await message.answer("Группа не найдена в диалогах. Попробуйте /join_group заново.")
+    except Exception as e:
+        await message.answer(f"Ошибка поиска в диалогах: {e}")
+        
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     user_tasks = {
