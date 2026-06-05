@@ -1,6 +1,4 @@
 import asyncio
-import io
-import csv
 import secrets
 import time
 import sqlite3
@@ -1116,17 +1114,9 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         f"Кикнуто из группы: {kicked_group} из {len(to_kick)}"
     )
 
-    # CSV
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["user_id"])
-    for uid in to_kick:
-        writer.writerow([uid])
-    csv_bytes = output.getvalue().encode("utf-8")
-
-    # Список для подтверждения (первые 30)
+    # Формируем список неотметившихся
     user_lines = []
-    for uid in to_kick[:30]:
+    for uid in to_kick:
         try:
             user = await bot.get_chat(uid)
             uname = f" (@{user.username})" if getattr(user, "username", None) else ""
@@ -1134,13 +1124,22 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         except Exception:
             user_lines.append(str(uid))
 
-    list_text = "\n".join(user_lines)
-    if len(to_kick) > 30:
-        list_text += f"\n\n... и ещё {len(to_kick) - 30}"
+    # Telegram ограничивает сообщение ~4096 символами — разбиваем если нужно
+    CHUNK = 80  # строк за раз
+    chunks = [user_lines[i:i + CHUNK] for i in range(0, len(user_lines), CHUNK)]
+
+    header = (
+        f"НЕОТМЕТИВШИЕСЯ\n\n"
+        f"Пост: {post_link}\n"
+        f"Всего: {len(to_kick)}\n\n"
+    )
+    for idx, chunk in enumerate(chunks):
+        part_text = (header if idx == 0 else f"(продолжение {idx + 1})\n\n")
+        part_text += "\n".join(chunk)
+        await bot.send_message(reply_chat_id, part_text)
 
     temp_id = f"{post_id}_{int(asyncio.get_event_loop().time())}"
     pending_cleanups[temp_id] = {
-        "csv_bytes": csv_bytes,
         "post_id": post_id,
         "post_link": post_link,
         "total_count": len(to_kick),
@@ -1154,17 +1153,9 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         InlineKeyboardButton(text="НЕТ",             callback_data=f"confirm_no_{temp_id}"),
     ]])
 
-    await bot.send_document(
-        reply_chat_id,
-        types.BufferedInputFile(csv_bytes, filename=f"kick_{post_id}.csv")
-    )
     await bot.send_message(
         reply_chat_id,
-        f"РЕЗУЛЬТАТ\n\n"
-        f"Пост: {post_link}\n"
-        f"Не отметилось: {len(to_kick)}\n\n"
-        f"Список:\n{list_text}\n\n"
-        f"Удалить из канала?",
+        "Удалить всех из канала?",
         reply_markup=keyboard
     )
 
