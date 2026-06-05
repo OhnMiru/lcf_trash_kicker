@@ -5,7 +5,7 @@ import sqlite3
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -316,15 +316,12 @@ def _delete_task(post_id: int):
 async def cmd_start(message: types.Message):
     await message.answer(
         "Бот для автоматической чистки канала\n\n"
-        "/login — авторизация (один раз)\n"
+        "/login — авторизация\n"
         "/setup — настройка канала и группы\n"
-        "/join_group — подключить аккаунт к группе (один раз после setup)\n"
         "/check ссылка часы — запустить проверку\n"
         "/status — активные задачи\n"
         "/cancel ID — отменить задачу\n"
         "/mysettings — текущие настройки\n"
-        "/test_session — тест сессии Pyrogram\n"
-        "/debug_session — диагностика сессии\n"
         "/reset_session — сбросить сессию"
     )
 
@@ -379,7 +376,7 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, api_id=data["api_id"], api_hash=api_hash)
 
     phone_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+        keyboard=[[KeyboardButton(text="Поделиться номером", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -438,9 +435,9 @@ async def process_phone(message: types.Message, state: FSMContext):
 
         await message.answer(
             "Код отправлен в Telegram!\n\n"
-            "⚠️ Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
+            "Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
             "Это защита от блокировки Telegram.\n\n"
-            f"👉 {auth_url}\n\n"
+            f"{auth_url}\n\n"
             "Ссылка действует 10 минут.",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -664,7 +661,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, channel_id=chat.id)
     await state.set_state(SetupState.waiting_for_group_link)
     await message.answer(
-        f"✅ Канал принят: {chat.title}\n"
+        f"Канал принят: {chat.title}\n"
         f"ID: {chat.id}\n\n"
         f"Шаг 2/2: Введите ID группы обсуждения\n\n"
         f"Узнать ID можно через @Getmyid_bot\n\n"
@@ -721,12 +718,10 @@ async def process_group_link(message: types.Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ Настройки сохранены!\n\n"
+        f"Настройки сохранены!\n\n"
         f"Канал ID: {settings['channel_id']}\n"
         f"Группа: {chat.title}\n"
         f"Группа ID: {chat.id}\n\n"
-        f"Следующий шаг: выполните /join_group чтобы подключить аккаунт к группе.\n"
-        f"Это нужно сделать один раз."
     )
 
 
@@ -743,7 +738,7 @@ async def cmd_mysettings(message: types.Message):
         f"Канал: {s['channel_id'] or 'не настроен'}\n"
         f"Группа: {s['group_id'] or 'не настроена'}\n"
         f"API ID: {s['api_id'] or 'не указан'}\n"
-        f"Авторизация: {'выполнена ✅' if s['session_string'] else 'не выполнена ❌'}"
+        f"Авторизация: {'выполнена' if s['session_string'] else 'не выполнена'}"
     )
 
 
@@ -826,15 +821,15 @@ async def cmd_check(message: types.Message):
     else:
         time_str = f"{hours} ч"
 
-    finish_time = datetime.fromtimestamp(
-        datetime.now().timestamp() + hours * 3600
-    ).strftime("%d.%m %H:%M")
+    tz_msk = timezone(timedelta(hours=3))
+    finish_time_msk = datetime.fromtimestamp(datetime.now().timestamp() + hours * 3600, tz=tz_msk)
+    time_str_finish = finish_time_msk.strftime("%d.%m %H:%M МСК")
 
     await message.answer(
         f"Задача создана\n\n"
         f"Пост: {post_url}\n"
         f"Ждём: {time_str}\n"
-        f"Проверка в: {finish_time}"
+        f"Проверка в: {time_str_finish}"
     )
 
     asyncio.create_task(
@@ -1205,12 +1200,12 @@ async function submit(){
   });
   const d = await r.json();
   if(d.ok){
-    document.getElementById('msg').innerHTML = '<div class="msg ok">✅ ' + d.message + '</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg ok">' + d.message + '</div>';
   } else if(d.need_password){
     document.getElementById('pass_block').style.display = 'block';
-    document.getElementById('msg').innerHTML = '<div class="msg err">⚠️ Требуется пароль 2FA</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg err">Требуется пароль 2FA</div>';
   } else {
-    document.getElementById('msg').innerHTML = '<div class="msg err">❌ ' + d.message + '</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg err">' + d.message + '</div>';
   }
 }
 document.addEventListener('keydown', e => { if(e.key==='Enter') submit(); });
@@ -1284,10 +1279,9 @@ def auth_verify():
 
             await bot.send_message(
                 user_id,
-                "Авторизация успешна! ✅\n\n"
-                "Следующие шаги:\n"
-                "1. /setup — настройте канал и группу\n"
-                "2. /join_group — подключите аккаунт к группе"
+                "Авторизация успешна!\n\n"
+                "Следующий шаг:\n"
+                "/setup — настройте канал и группу\n"
             )
             return {"ok": True}
 
