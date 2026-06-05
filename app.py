@@ -716,14 +716,21 @@ async def process_group_link(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, group_id=chat.id)
     settings = get_settings(message.from_user.id)
 
+    # Получаем название канала
+    try:
+        channel_chat = await bot.get_chat(settings['channel_id'])
+        channel_title = channel_chat.title
+    except Exception:
+        channel_title = str(settings['channel_id'])
+
     await state.clear()
     await message.answer(
         f"Настройки сохранены!\n\n"
+        f"Канал: {channel_title}\n"
         f"Канал ID: {settings['channel_id']}\n"
         f"Группа: {chat.title}\n"
         f"Группа ID: {chat.id}\n\n"
     )
-
 
 # ----- MYSETTINGS -----
 
