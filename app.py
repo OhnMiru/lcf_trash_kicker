@@ -1013,11 +1013,25 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
     result = await kick_from_channel(
         client, settings["channel_id"], data["user_ids_list"], update_progress
     )
+
+    # Кикаем из группы обсуждения через бота
+    kicked_group = 0
+    if settings.get("group_id"):
+        for uid in data["user_ids_list"]:
+            try:
+                await bot.ban_chat_member(settings["group_id"], uid)
+                await asyncio.sleep(0.1)
+                await bot.unban_chat_member(settings["group_id"], uid)
+                kicked_group += 1
+            except Exception:
+                pass
+
     await callback.message.edit_text(
         f"ГОТОВО\n\n"
         f"Пост: {data['post_link']}\n"
         f"Не отметилось: {data['total_count']}\n"
         f"Удалено из канала: {result['success']}\n"
+        f"Удалено из группы: {kicked_group}\n"
         f"Ошибок: {result['errors']}"
     )
     del pending_cleanups[temp_id]
@@ -1065,54 +1079,26 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
     commenters = await get_commenters(client, settings["channel_id"], post_id)
     await bot.send_message(reply_chat_id, f"Комментаторов: {len(commenters)}")
 
-    # Собираем участников группы через Pyrogram
-    # Используем поиск по диалогам — единственный надёжный способ для нестандартных ID
+    # Собираем подписчиков канала через Pyrogram
     members = set()
     try:
-        group_chat = await find_group_in_dialogs(client, settings["group_id"])
-        if group_chat is None:
-            await bot.send_message(
-                reply_chat_id,
-                "Группа не найдена в диалогах аккаунта.\n"
-                "Выполните /join_group и повторите /check."
-            )
-            return
-
-        async for member in client.get_chat_members(group_chat.id):
+        async for member in client.get_chat_members(settings["channel_id"]):
             if member.user and not member.user.is_bot:
                 members.add(member.user.id)
-
     except Exception as e:
         await bot.send_message(
             reply_chat_id,
-            f"Ошибка сбора участников группы: {e}\n\n"
-            f"Выполните /join_group и повторите /check"
+            f"Ошибка сбора подписчиков канала: {e}"
         )
         return
 
-    await bot.send_message(reply_chat_id, f"Участников группы: {len(members)}")
+    await bot.send_message(reply_chat_id, f"Подписчиков канала: {len(members)}")
 
     to_kick = list(members - commenters)
 
     if not to_kick:
         await bot.send_message(reply_chat_id, f"Все отметились под постом {post_link}")
         return
-
-    # Кикаем из группы обсуждения через бота
-    kicked_group = 0
-    for uid in to_kick:
-        try:
-            await bot.ban_chat_member(settings["group_id"], uid)
-            await asyncio.sleep(0.1)
-            await bot.unban_chat_member(settings["group_id"], uid)
-            kicked_group += 1
-        except Exception:
-            pass
-
-    await bot.send_message(
-        reply_chat_id,
-        f"Кикнуто из группы: {kicked_group} из {len(to_kick)}"
-    )
 
     # Формируем список неотметившихся
     user_lines = []
