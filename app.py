@@ -88,11 +88,32 @@ class SetupState(StatesGroup):
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
 def parse_post_url(url: str):
-    """Парсит ссылку на пост, возвращает (channel_id_or_username, post_id)."""
     clean_url = re.sub(r'https?://(telegram\.me|t\.me)/', '', url)
     parts = clean_url.split('/')
-    if len(parts) != 2:
-        return None, None
+
+    # Приватный канал: c/1838405022/15292
+    if len(parts) == 3 and parts[0] == 'c':
+        try:
+            channel_id = int("-100" + parts[1])
+            post_id = int(parts[2])
+            return channel_id, post_id
+        except ValueError:
+            return None, None
+
+    # Публичный канал: mychannel/15292
+    if len(parts) == 2:
+        channel_part = parts[0]
+        try:
+            post_id = int(parts[1])
+        except ValueError:
+            return None, None
+        if channel_part.lstrip('-').isdigit():
+            channel_id = int("-100" + channel_part) if not channel_part.startswith('-') else int(channel_part)
+        else:
+            channel_id = channel_part
+        return channel_id, post_id
+
+    return None, None
     channel_part = parts[0]
     try:
         post_id = int(parts[1])
