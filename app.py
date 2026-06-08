@@ -5,7 +5,7 @@ import sqlite3
 import os
 import re
 import threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -86,18 +86,6 @@ class SetupState(StatesGroup):
     waiting_for_group_link = State()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-
-def to_pyrogram_ban_id(channel_id: int) -> int:
-    """
-    Конвертирует channel_id из формата Bot API (-100XXXXXXXXX)
-    в числовой peer ID для ban_chat_member в Pyrogram (без префикса -100).
-    Используется ТОЛЬКО для ban_chat_member.
-    """
-    channel_id_str = str(channel_id)
-    if channel_id_str.startswith("-100"):
-        return int(channel_id_str[4:])
-    return channel_id
-
 
 def parse_post_url(url: str):
     """Парсит ссылку на пост, возвращает (channel_id_or_username, post_id)."""
@@ -229,10 +217,7 @@ async def get_pyrogram_client(user_id: int) -> Client | None:
 
 
 async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[int]:
-    """
-    Собирает ID всех комментаторов под постом.
-    channel_id передаётся в полном формате Bot API (-100XXXXXXXXX).
-    """
+    """Собирает ID всех комментаторов под постом."""
     commenters = set()
     try:
         async for msg in client.get_discussion_replies(channel_id, post_id):
@@ -257,26 +242,18 @@ async def get_commenters(client: Client, channel_id: int, post_id: int) -> set[i
 
 async def kick_from_channel(client: Client, channel_id: int, user_ids: list[int],
                             progress_callback=None) -> dict:
-    """
-    Кикает пользователей из канала.
-    channel_id передаётся в полном формате Bot API (-100XXXXXXXXX),
-    внутри конвертируется для ban_chat_member.
-    """
     if not user_ids:
         return {"success": 0, "errors": 0, "total": 0}
-
-    ban_id = to_pyrogram_ban_id(channel_id)
-
     success = 0
     errors = 0
     for idx, uid in enumerate(user_ids):
         try:
-            await client.ban_chat_member(ban_id, uid)
+            await client.ban_chat_member(channel_id, uid)
             success += 1
         except FloodWait as e:
             await asyncio.sleep(e.value)
             try:
-                await client.ban_chat_member(ban_id, uid)
+                await client.ban_chat_member(channel_id, uid)
                 success += 1
             except Exception:
                 errors += 1
@@ -339,12 +316,15 @@ def _delete_task(post_id: int):
 async def cmd_start(message: types.Message):
     await message.answer(
         "Бот для автоматической чистки канала\n\n"
-        "/login — авторизация\n"
+        "/login — авторизация (один раз)\n"
         "/setup — настройка канала и группы\n"
+        "/join_group — подключить аккаунт к группе (один раз после setup)\n"
         "/check ссылка часы — запустить проверку\n"
         "/status — активные задачи\n"
         "/cancel ID — отменить задачу\n"
         "/mysettings — текущие настройки\n"
+        "/test_session — тест сессии Pyrogram\n"
+        "/debug_session — диагностика сессии\n"
         "/reset_session — сбросить сессию"
     )
 
@@ -399,7 +379,7 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, api_id=data["api_id"], api_hash=api_hash)
 
     phone_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Поделиться номером", request_contact=True)]],
+        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -458,9 +438,9 @@ async def process_phone(message: types.Message, state: FSMContext):
 
         await message.answer(
             "Код отправлен в Telegram!\n\n"
-            "Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
+            "⚠️ Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
             "Это защита от блокировки Telegram.\n\n"
-            f"{auth_url}\n\n"
+            f"👉 {auth_url}\n\n"
             "Ссылка действует 10 минут.",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -506,6 +486,7 @@ async def cmd_join_group(message: types.Message):
 
     await message.answer("Проверяю доступ к группе...")
 
+    # Сначала ищем в диалогах — самый надёжный способ
     group_chat = await find_group_in_dialogs(client, settings["group_id"])
 
     if group_chat:
@@ -515,11 +496,13 @@ async def cmd_join_group(message: types.Message):
         )
         return
 
+    # Не нашли в диалогах — вступаем по инвайт-ссылке
     await message.answer("Группа не найдена в диалогах. Вступаю по инвайт-ссылке...")
     try:
         invite_link = await bot.export_chat_invite_link(settings["group_id"])
         await client.join_chat(invite_link)
 
+        # Проверяем после вступления
         group_chat = await find_group_in_dialogs(client, settings["group_id"])
         if group_chat:
             await message.answer(
@@ -681,7 +664,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, channel_id=chat.id)
     await state.set_state(SetupState.waiting_for_group_link)
     await message.answer(
-        f"Канал принят: {chat.title}\n"
+        f"✅ Канал принят: {chat.title}\n"
         f"ID: {chat.id}\n\n"
         f"Шаг 2/2: Введите ID группы обсуждения\n\n"
         f"Узнать ID можно через @Getmyid_bot\n\n"
@@ -736,19 +719,14 @@ async def process_group_link(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, group_id=chat.id)
     settings = get_settings(message.from_user.id)
 
-    try:
-        channel_chat = await bot.get_chat(settings['channel_id'])
-        channel_title = channel_chat.title
-    except Exception:
-        channel_title = str(settings['channel_id'])
-
     await state.clear()
     await message.answer(
-        f"Настройки сохранены!\n\n"
-        f"Канал: {channel_title}\n"
+        f"✅ Настройки сохранены!\n\n"
         f"Канал ID: {settings['channel_id']}\n"
         f"Группа: {chat.title}\n"
         f"Группа ID: {chat.id}\n\n"
+        f"Следующий шаг: выполните /join_group чтобы подключить аккаунт к группе.\n"
+        f"Это нужно сделать один раз."
     )
 
 
@@ -765,7 +743,7 @@ async def cmd_mysettings(message: types.Message):
         f"Канал: {s['channel_id'] or 'не настроен'}\n"
         f"Группа: {s['group_id'] or 'не настроена'}\n"
         f"API ID: {s['api_id'] or 'не указан'}\n"
-        f"Авторизация: {'выполнена' if s['session_string'] else 'не выполнена'}"
+        f"Авторизация: {'выполнена ✅' if s['session_string'] else 'не выполнена ❌'}"
     )
 
 
@@ -848,15 +826,15 @@ async def cmd_check(message: types.Message):
     else:
         time_str = f"{hours} ч"
 
-    tz_msk = timezone(timedelta(hours=3))
-    finish_time_msk = datetime.fromtimestamp(datetime.now().timestamp() + hours * 3600, tz=tz_msk)
-    time_str_finish = finish_time_msk.strftime("%d.%m %H:%M МСК")
+    finish_time = datetime.fromtimestamp(
+        datetime.now().timestamp() + hours * 3600
+    ).strftime("%d.%m %H:%M")
 
     await message.answer(
         f"Задача создана\n\n"
         f"Пост: {post_url}\n"
         f"Ждём: {time_str}\n"
-        f"Проверка в: {time_str_finish}"
+        f"Проверка в: {finish_time}"
     )
 
     asyncio.create_task(
@@ -1024,7 +1002,6 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
 
     settings = get_settings(data["user_id"])
 
-    # Передаём полный channel_id; kick_from_channel сам конвертирует для ban
     async def update_progress(current, total):
         try:
             await callback.message.edit_text(
@@ -1037,7 +1014,7 @@ async def handle_confirm_yes(callback: types.CallbackQuery):
         client, settings["channel_id"], data["user_ids_list"], update_progress
     )
 
-    # Кикаем из группы обсуждения через бота (Bot API)
+    # Кикаем из группы обсуждения через бота
     kicked_group = 0
     if settings.get("group_id"):
         for uid in data["user_ids_list"]:
@@ -1098,46 +1075,20 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         )
         return
 
-    # Используем полный channel_id (-100XXXXXXXXX) для всех операций кроме бана
-    channel_id = settings["channel_id"]
-
-    # Резолвим peer — Pyrogram должен "знать" канал перед работой с ним
-    try:
-        await client.get_chat(channel_id)
-        print(f"[Task] Peer {channel_id} успешно резолвнут")
-    except Exception as e:
-        print(f"[Task] Не удалось резолвнуть через ID ({e}), пробуем вступить по инвайт-ссылке...")
-        try:
-            invite_link = await bot.export_chat_invite_link(channel_id)
-            await client.join_chat(invite_link)
-            print(f"[Task] Вступил в канал через инвайт-ссылку")
-            await asyncio.sleep(2)
-        except Exception as e2:
-            err = str(e2).lower()
-            if "already" not in err and "user_already_participant" not in err:
-                await bot.send_message(
-                    reply_chat_id,
-                    f"Ошибка: не удалось получить доступ к каналу.\n{e2}\n\n"
-                    f"Попробуйте выполнить /join_group вручную."
-                )
-                return
-            print(f"[Task] Уже в канале, продолжаем")
-
     # Собираем комментаторов
-    commenters = await get_commenters(client, channel_id, post_id)
+    commenters = await get_commenters(client, settings["channel_id"], post_id)
     await bot.send_message(reply_chat_id, f"Комментаторов: {len(commenters)}")
 
-    # Собираем подписчиков канала
+    # Собираем подписчиков канала через Pyrogram
     members = set()
     try:
-        async for member in client.get_chat_members(channel_id):
+        async for member in client.get_chat_members(settings["channel_id"]):
             if member.user and not member.user.is_bot:
                 members.add(member.user.id)
     except Exception as e:
         await bot.send_message(
             reply_chat_id,
-            f"Ошибка сбора подписчиков канала: {e}\n\n"
-            f"Попробуйте выполнить /join_group и повторить /check"
+            f"Ошибка сбора подписчиков канала: {e}"
         )
         return
 
@@ -1149,6 +1100,7 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         await bot.send_message(reply_chat_id, f"Все отметились под постом {post_link}")
         return
 
+    # Формируем список неотметившихся
     user_lines = []
     for uid in to_kick:
         try:
@@ -1158,7 +1110,8 @@ async def process_post(post_id: int, deadline: float, reply_chat_id: int,
         except Exception:
             user_lines.append(str(uid))
 
-    CHUNK = 80
+    # Telegram ограничивает сообщение ~4096 символами — разбиваем если нужно
+    CHUNK = 80  # строк за раз
     chunks = [user_lines[i:i + CHUNK] for i in range(0, len(user_lines), CHUNK)]
 
     header = (
@@ -1252,12 +1205,12 @@ async function submit(){
   });
   const d = await r.json();
   if(d.ok){
-    document.getElementById('msg').innerHTML = '<div class="msg ok">' + d.message + '</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg ok">✅ ' + d.message + '</div>';
   } else if(d.need_password){
     document.getElementById('pass_block').style.display = 'block';
-    document.getElementById('msg').innerHTML = '<div class="msg err">Требуется пароль 2FA</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg err">⚠️ Требуется пароль 2FA</div>';
   } else {
-    document.getElementById('msg').innerHTML = '<div class="msg err">' + d.message + '</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg err">❌ ' + d.message + '</div>';
   }
 }
 document.addEventListener('keydown', e => { if(e.key==='Enter') submit(); });
@@ -1331,9 +1284,10 @@ def auth_verify():
 
             await bot.send_message(
                 user_id,
-                "Авторизация успешна!\n\n"
-                "Следующий шаг:\n"
-                "/setup — настройте канал и группу\n"
+                "Авторизация успешна! ✅\n\n"
+                "Следующие шаги:\n"
+                "1. /setup — настройте канал и группу\n"
+                "2. /join_group — подключите аккаунт к группе"
             )
             return {"ok": True}
 
