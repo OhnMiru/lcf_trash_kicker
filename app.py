@@ -400,7 +400,7 @@ async def process_api_hash(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, api_id=data["api_id"], api_hash=api_hash)
 
     phone_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+        keyboard=[[KeyboardButton(text="Поделиться номером", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -459,9 +459,9 @@ async def process_phone(message: types.Message, state: FSMContext):
 
         await message.answer(
             "Код отправлен в Telegram!\n\n"
-            "⚠️ Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
+            "Важно: вводить код нужно НЕ здесь, а по ссылке ниже.\n"
             "Это защита от блокировки Telegram.\n\n"
-            f"👉 {auth_url}\n\n"
+            f"{auth_url}\n\n"
             "Ссылка действует 10 минут.",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -685,7 +685,7 @@ async def process_channel_link(message: types.Message, state: FSMContext):
     save_settings(message.from_user.id, channel_id=chat.id)
     await state.set_state(SetupState.waiting_for_group_link)
     await message.answer(
-        f"✅ Канал принят: {chat.title}\n"
+        f"Канал принят: {chat.title}\n"
         f"ID: {chat.id}\n\n"
         f"Шаг 2/2: Введите ID группы обсуждения\n\n"
         f"Узнать ID можно через @Getmyid_bot\n\n"
@@ -742,7 +742,7 @@ async def process_group_link(message: types.Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ Настройки сохранены!\n\n"
+        f"Настройки сохранены!\n\n"
         f"Канал ID: {settings['channel_id']}\n"
         f"Группа: {chat.title}\n"
         f"Группа ID: {chat.id}\n\n"
@@ -764,7 +764,7 @@ async def cmd_mysettings(message: types.Message):
         f"Канал: {s['channel_id'] or 'не настроен'}\n"
         f"Группа: {s['group_id'] or 'не настроена'}\n"
         f"API ID: {s['api_id'] or 'не указан'}\n"
-        f"Авторизация: {'выполнена ✅' if s['session_string'] else 'не выполнена ❌'}"
+        f"Авторизация: {'выполнена' if s['session_string'] else 'не выполнена'}"
     )
 
 
@@ -1226,12 +1226,12 @@ async function submit(){
   });
   const d = await r.json();
   if(d.ok){
-    document.getElementById('msg').innerHTML = '<div class="msg ok">✅ ' + d.message + '</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg ok">' + d.message + '</div>';
   } else if(d.need_password){
     document.getElementById('pass_block').style.display = 'block';
-    document.getElementById('msg').innerHTML = '<div class="msg err">⚠️ Требуется пароль 2FA</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg err">Требуется пароль 2FA</div>';
   } else {
-    document.getElementById('msg').innerHTML = '<div class="msg err">❌ ' + d.message + '</div>';
+    document.getElementById('msg').innerHTML = '<div class="msg err">' + d.message + '</div>';
   }
 }
 document.addEventListener('keydown', e => { if(e.key==='Enter') submit(); });
@@ -1305,7 +1305,7 @@ def auth_verify():
 
             await bot.send_message(
                 user_id,
-                "Авторизация успешна! ✅\n\n"
+                "Авторизация успешна!\n\n"
                 "Следующие шаги:\n"
                 "1. /setup — настройте канал и группу\n"
                 "2. /join_group — подключите аккаунт к группе"
